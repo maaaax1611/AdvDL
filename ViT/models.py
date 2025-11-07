@@ -1,6 +1,7 @@
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
+import numpy as np
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
@@ -42,16 +43,22 @@ class Attention(nn.Module):
     def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
         super().__init__()
         # set heads and scale (=sqrt(dim_head))
-        # TODO
+        self.heads = heads
+        self.scale = np.sqrt(dim_head)
         # we need softmax layer and dropout
-        # TODO
+        self.softmax = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
         # as well as the q linear layer
-        # TODO
         # and the k/v linear layer (can be realized as one single linear layer
         # or as two individual ones)
-        # TODO
+        self.q = nn.Linear(dim, dim_head*self.heads, bias=False)
+        self.k = nn.Linear(dim, dim_head*self.heads, bias=False)
+        self.v = nn.Linear(dim, dim_head*self.heads, bias=False)     
         # and the output linear layer followed by dropout
-        # TODO
+        self.output = nn.Sequential(
+            nn.Linear(dim_head*self.heads, dim),
+            nn.Dropout(dropout)
+        )
 
     def forward(self, x, context = None, kv_include_self = False):
         # now compute the attention/cross-attention
@@ -59,6 +66,7 @@ class Attention(nn.Module):
         # don't forget the dropout after the attention 
         # and before the multiplication w. 'v'
         # the output should be in the shape 'b n (h d)'
+        # [batch_size, num_tokens, heads, dim_head]
         b, n, _, h = *x.shape, self.heads
         if context is None:
             context = x
@@ -67,8 +75,28 @@ class Attention(nn.Module):
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim = 1) 
         
-        # TODO: attention 
+        # TODO: attention
+        q = self.q(x)
+        k = self.k(context)
+        v = self.v(context)
 
+        # rearrange for multi head attention
+        # x has shape: [b, n, (h,d)]
+        # to compute attention we need [b, h, n, d]
+        q = rearrange(q, 'b n (h d) -> b h n d', h = h)
+        k = rearrange(k, 'b m (h d) -> b h m d', h = h)
+        v = rearrange(v, 'b m (h d) -> b h m d', h = h)
+
+        dots = torch.einsum('b h n d, b h m d -> b h n m', q, k) / self.scale
+        attn = self.dropout(self.softmax(dots))
+
+        # (b h n m) @ (b h m d) --> (b h n d)
+        out = torch.einsum('b h n m, b h m d -> b h n d', attn, v)
+        # rearrange back to (b n (h d))
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        # pass through output layer
+        out = self.output(out)
+        
         return out 
 
 
