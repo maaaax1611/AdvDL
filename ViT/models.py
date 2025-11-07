@@ -96,7 +96,7 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         # pass through output layer
         out = self.output(out)
-        
+
         return out 
 
 
@@ -119,6 +119,7 @@ class Transformer(nn.Module):
 
 # CrossViT
 # projecting CLS tokens, in the case that small and large patch tokens have different dimensions
+# needed to attend small cls token to big one (i guess)
 class ProjectInOut(nn.Module):
     """
     Adapter class that embeds a callable (layer) and handles mismatching dimensions
@@ -145,8 +146,13 @@ class ProjectInOut(nn.Module):
             - after calling fn, the tensor has to be projected back into it's original shape   
             - fn(W_in) * W_out
         """
-        # TODO
-        return x
+        x_projected = self.project_in(x)
+
+        # pass everything to wrapped function
+        out = self.fn(x_projected, *args, **kwargs)
+
+        out_projected = self.project_out(out)
+        return out_projected
 
 # CrossViT
 # cross attention transformer
