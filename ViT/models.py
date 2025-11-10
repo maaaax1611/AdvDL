@@ -192,7 +192,7 @@ class CrossTransformer(nn.Module):
         # finally concat sm/lg cls tokens with patch tokens 
         sm_tokens = torch.cat((sm_cls, sm_patch_tokens), dim = 1)
         lg_tokens = torch.cat((lg_cls, lg_patch_tokens), dim = 1)
-        
+
         return sm_tokens, lg_tokens
 
 # CrossViT
@@ -216,11 +216,26 @@ class MultiScaleEncoder(nn.Module):
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 # 2 transformer branches, one for small, one for large patchs
+                Transformer(dim = sm_dim, **sm_enc_params, dropout = dropout),
+                Transformer(dim = lg_dim, **lg_enc_params, dropout = dropout),
                 # + 1 cross transformer block
+                CrossTransformer(
+                    sm_dim = sm_dim, 
+                    lg_dim = lg_dim, 
+                    depth = cross_attn_depth, 
+                    heads = cross_attn_heads, 
+                    dim_head = cross_attn_dim_head, 
+                    dropout = dropout
+                )
             ]))
 
     def forward(self, sm_tokens, lg_tokens):
         # forward through the transformer encoders and cross attention block
+        for sm_enc, lg_enc, cross_attn in self.layers:
+            sm_tokens = sm_enc(sm_tokens)
+            lg_tokens = lg_enc(lg_tokens)
+            sm_tokens, lg_tokens = cross_attn(sm_tokens, lg_tokens)
+
         return sm_tokens, lg_tokens
 
 # CrossViT (could actually also be used in ViT)
@@ -243,19 +258,28 @@ class ImageEmbedder(nn.Module):
         # create layer that re-arranges the image patches
         # and embeds them with layer norm + linear projection + layer norm
         self.to_patch_embedding = nn.Sequential(
-        # TODO 
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim),
+            nn.LayerNorm(dim),
         )
         # create/initialize #dim-dimensional positional embedding (will be learned)
-        # TODO
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         # create #dim cls tokens (for each patch embedding)
-        # TODO
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         # create dropput layer
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, img):
         # forward through patch embedding layer
+        x = self.to_patch_embedding(img)
+        b, n, _ = x.shape
         # concat class tokens
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
         # and add positional embedding
+        x += self.pos_embedding[:, :(n + 1)]
+
         return self.dropout(x)
 
 
@@ -351,7 +375,8 @@ class CrossViT(nn.Module):
     ):
         super().__init__()
         # create ImageEmbedder for small and large patches
-        # TODO
+        self.sm_image_embedder = ImageEmbedder(dim = sm_dim, image_size = image_size, patch_size = sm_patch_size, dropout = emb_dropout)
+        self.lg_image_embedder = ImageEmbedder(dim = lg_dim, image_size = image_size, patch_size = lg_patch_size, dropout = emb_dropout)
 
         # create MultiScaleEncoder
         self.multi_scale_encoder = MultiScaleEncoder(
@@ -382,13 +407,19 @@ class CrossViT(nn.Module):
 
     def forward(self, img):
         # apply image embedders
-        # TODO
+        sm_tokens = self.sm_image_embedder(img)
+        lg_tokens = self.lg_image_embedder(img)
 
         # and the multi-scale encoder
-        # TODO
+        sm_tokens, lg_tokens = self.multi_scale_encoder(sm_tokens, lg_tokens)
 
         # call the mlp heads w. the class tokens 
-        # TODO
+        # As per fig 2, CLS token is the first token
+        sm_cls = sm_tokens[:, 0]
+        lg_cls = lg_tokens[:, 0]
+
+        sm_logits = self.sm_mlp_head(sm_cls)
+        lg_logits = self.lg_mlp_head(lg_cls)
         
         return sm_logits + lg_logits
 
@@ -403,3 +434,19 @@ if __name__ == "__main__":
                     depth = 3, dropout = 0.1, emb_dropout = 0.1)
     print(vit(x).shape)
     print(cvit(x).shape)
+
+    # Test ViT
+    print("Testing ViT...")
+    try:
+        vit_output = vit(x)
+        print(f"ViT output shape: {vit_output.shape}") # Expected: torch.Size([16, 10])
+    except Exception as e:
+        print(f"Error during ViT test: {e}")
+
+    # Test CrossViT
+    print("\nTesting CrossViT...")
+    try:
+        cvit_output = cvit(x)
+        print(f"CrossViT output shape: {cvit_output.shape}") # Expected: torch.Size([16, 10])
+    except Exception as e:
+        print(f"Error during CrossViT test: {e}")
