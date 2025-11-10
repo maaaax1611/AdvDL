@@ -119,7 +119,8 @@ class Transformer(nn.Module):
 
 # CrossViT
 # projecting CLS tokens, in the case that small and large patch tokens have different dimensions
-# needed to attend small cls token to big one (i guess)
+# handles dimension issues in Cross Attention
+# Adjust dimensions when small CLS Token is used as query for large patch tokens and vise versa
 class ProjectInOut(nn.Module):
     """
     Adapter class that embeds a callable (layer) and handles mismatching dimensions
@@ -161,8 +162,18 @@ class CrossTransformer(nn.Module):
     def __init__(self, sm_dim, lg_dim, depth, heads, dim_head, dropout):
         super().__init__()
         self.layers = nn.ModuleList([])
-        # TODO: create # depth encoders using ProjectInOut
-        # Note: no positional FFN here 
+        # create #depth encoders using ProjectInOut
+        # Note: no positional FFN here
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                # Small CLS token attends to Large patch tokens
+                # Input sm_cls (sm_dim) -> Project to lg_dim -> Attend in lg_dim -> Project back to sm_dim
+                ProjectInOut(sm_dim, lg_dim, PreNorm(lg_dim, Attention(lg_dim, heads=heads, dim_head=dim_head, dropout=dropout))),
+
+                # Large CLS token attends to Small patch tokens
+                # Input lg_cls (lg_dim) -> Project to sm_dim -> Attend in sm_dim -> Project back to lg_dim
+                ProjectInOut(lg_dim, sm_dim, PreNorm(sm_dim, Attention(sm_dim, heads = heads, dim_head = dim_head, dropout = dropout)))
+            ])) 
 
     def forward(self, sm_tokens, lg_tokens):
         (sm_cls, sm_patch_tokens), (lg_cls, lg_patch_tokens) = map(lambda t: (t[:, :1], t[:, 1:]), (sm_tokens, lg_tokens))
@@ -171,9 +182,17 @@ class CrossTransformer(nn.Module):
         # cross attend to 
         # 1. small cls token to large patches and
         # 2. large cls token to small patches
-        # TODO
+        for sm_to_lg_attn, lg_to_sm_attn in self.layers:
+            # Small CLS attends to large patches
+            # Residual connection is crucial
+            sm_cls = sm_to_lg_attn(sm_cls, context = lg_patch_tokens, kv_include_self = False) + sm_cls    
+            # Large CLS attends to small patches
+            lg_cls = lg_to_sm_attn(lg_cls, context = sm_patch_tokens, kv_include_self = False) + lg_cls
+
         # finally concat sm/lg cls tokens with patch tokens 
-        # TODO
+        sm_tokens = torch.cat((sm_cls, sm_patch_tokens), dim = 1)
+        lg_tokens = torch.cat((lg_cls, lg_patch_tokens), dim = 1)
+        
         return sm_tokens, lg_tokens
 
 # CrossViT
