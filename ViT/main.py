@@ -5,6 +5,7 @@ from torch import nn
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
 from torch import optim
+from tqdm import tqdm  # Import tqdm
 
 from models import ViT, CrossViT   # rename the skeleton file for your implementation / comment before testing for ResNet
 
@@ -18,33 +19,45 @@ def parse_args():
     parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum (default: 0.9)')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
-    parser.add_argument('--log-interval', type=int, default=10, help='how many batches to wait before logging training status')
+    parser.add_argument('--log-interval', type=int, default=10, help='how many batches to wait before logging training status (used by tqdm postfix)')
     parser.add_argument('--save-model', action='store_true', default=False, help='For Saving the current Model')
     parser.add_argument('--dry-run', action='store_true', default=False, help='quickly check a single pass')
     return parser.parse_args()
 
 def train(model, trainloader, optimizer, criterion, device, epoch, args):
     model.train()
-    for batch_idx, (data, target) in enumerate(trainloader):
+    
+    # Create a tqdm progress bar for the training loop
+    # Set leave=False so the bar disappears after the epoch is done
+    pbar = tqdm(trainloader, total=len(trainloader), desc=f'Train Epoch {epoch}', leave=False)
+    
+    for batch_idx, (data, target) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)/len(output)
         loss.backward()
         optimizer.step()
+        
+        # Update the progress bar's postfix with the current loss
+        # This replaces the old print statement
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(trainloader.dataset),
-                       100. * batch_idx / len(trainloader), loss.item()))
-            if args.dry_run:
-                break
+            pbar.set_postfix({'loss': loss.item()})
+            
+        if args.dry_run:
+            break
 
 def test(model, device, test_loader, criterion, set="Test"):
     model.eval()
     test_loss = 0
     correct = 0
+    
+    # Create a tqdm progress bar for the validation/test loop
+    # Set leave=False so the bar disappears after completion
+    pbar = tqdm(test_loader, total=len(test_loader), desc=f'{set} Set', leave=False)
+    
     with torch.no_grad():
-        for data, target in test_loader:
+        for data, target in pbar:  # Loop over the progress bar
             data, target = data.to(device), target.to(device)
             output = model(data)
             test_loss += criterion(output, target).item()  # sum up batch loss
@@ -54,6 +67,7 @@ def test(model, device, test_loader, criterion, set="Test"):
     test_loss /= len(test_loader.dataset)
     accuracy = 100. * correct / len(test_loader.dataset)
 
+    # This print remains, as it's the summary for the *entire* set
     print('\n{} set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         set, test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
@@ -124,6 +138,9 @@ def run(args):
     best_accuracy = 0.0
     best_model_path = os.path.join(model_dir, f'checkpoint_{args.model}.pt')
 
+    # --- Epoch Loop ---
+    # You could also wrap this loop in tqdm(range(1, args.epochs + 1), desc='Total Progress')
+    # But the bars for train/val inside the loop are often more informative.
     for epoch in range(1, args.epochs + 1):
         train(model, trainloader, optimizer, criterion, device, epoch, args)
         val_accuracy = test(model, device, valloader, criterion, set="Validation")
@@ -143,7 +160,8 @@ def run(args):
     # Load best model for final test
     if args.save_model:
         if os.path.exists(best_model_path):
-            checkpoint = torch.load(best_model_path)
+            # Add weights_only=True to address the security warning
+            checkpoint = torch.load(best_model_path, weights_only=True)
             model.load_state_dict(checkpoint['model_state_dict'])
             print(f'\nLoaded best model from epoch {checkpoint["epoch"]} with validation accuracy: {checkpoint["accuracy"]:.2f}%')
         else:
