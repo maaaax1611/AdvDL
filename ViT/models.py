@@ -89,14 +89,14 @@ class Attention(nn.Module):
         k = rearrange(k, 'b m (h d) -> b h m d', h = h)
         v = rearrange(v, 'b m (h d) -> b h m d', h = h)
 
-        dots = torch.einsum('b h n d, b h m d -> b h n m', q, k) / self.scale
+        dots = einsum('b h n d, b h m d -> b h n m', q, k) / self.scale
         attn = self.dropout(self.softmax(dots))
 
         # store attention map
         self.attn = attn
 
         # (b h n m) @ (b h m d) --> (b h n d)
-        out = torch.einsum('b h n m, b h m d -> b h n d', attn, v)
+        out = einsum('b h n m, b h m d -> b h n d', attn, v)
         # rearrange back to (b n (h d))
         out = rearrange(out, 'b h n d -> b n (h d)')
         # pass through output layer
