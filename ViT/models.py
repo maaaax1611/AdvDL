@@ -59,6 +59,8 @@ class Attention(nn.Module):
             nn.Linear(dim_head*self.heads, dim),
             nn.Dropout(dropout)
         )
+        # store attention maps for visualization
+        self.attn = None
 
     def forward(self, x, context = None, kv_include_self = False):
         # now compute the attention/cross-attention
@@ -89,6 +91,9 @@ class Attention(nn.Module):
 
         dots = torch.einsum('b h n d, b h m d -> b h n m', q, k) / self.scale
         attn = self.dropout(self.softmax(dots))
+
+        # store attention map
+        self.attn = attn
 
         # (b h n m) @ (b h m d) --> (b h n d)
         out = torch.einsum('b h n m, b h m d -> b h n d', attn, v)
@@ -241,6 +246,7 @@ class MultiScaleEncoder(nn.Module):
 # CrossViT (could actually also be used in ViT)
 # helper function that makes the embedding from patches
 # have a look at the image embedding in ViT
+# https://youtu.be/j3VNqtJUoz0
 class ImageEmbedder(nn.Module):
     def __init__(
         self,
@@ -257,6 +263,7 @@ class ImageEmbedder(nn.Module):
 
         # create layer that re-arranges the image patches
         # and embeds them with layer norm + linear projection + layer norm
+        # rearrangement pattern from 
         self.to_patch_embedding = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
             nn.LayerNorm(patch_dim),

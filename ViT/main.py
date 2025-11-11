@@ -5,9 +5,9 @@ from torch import nn
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
 from torch import optim
-from tqdm import tqdm  # Import tqdm
+from tqdm import tqdm
 
-from models import ViT, CrossViT   # rename the skeleton file for your implementation / comment before testing for ResNet
+from models import ViT, CrossViT
 
 
 def parse_args():
@@ -27,8 +27,6 @@ def parse_args():
 def train(model, trainloader, optimizer, criterion, device, epoch, args):
     model.train()
     
-    # Create a tqdm progress bar for the training loop
-    # Set leave=False so the bar disappears after the epoch is done
     pbar = tqdm(trainloader, total=len(trainloader), desc=f'Train Epoch {epoch}', leave=False)
     
     for batch_idx, (data, target) in enumerate(pbar):
@@ -39,8 +37,6 @@ def train(model, trainloader, optimizer, criterion, device, epoch, args):
         loss.backward()
         optimizer.step()
         
-        # Update the progress bar's postfix with the current loss
-        # This replaces the old print statement
         if batch_idx % args.log_interval == 0:
             pbar.set_postfix({'loss': loss.item()})
             
@@ -52,8 +48,6 @@ def test(model, device, test_loader, criterion, set="Test"):
     test_loss = 0
     correct = 0
     
-    # Create a tqdm progress bar for the validation/test loop
-    # Set leave=False so the bar disappears after completion
     pbar = tqdm(test_loader, total=len(test_loader), desc=f'{set} Set', leave=False)
     
     with torch.no_grad():
@@ -67,7 +61,6 @@ def test(model, device, test_loader, criterion, set="Test"):
     test_loss /= len(test_loader.dataset)
     accuracy = 100. * correct / len(test_loader.dataset)
 
-    # This print remains, as it's the summary for the *entire* set
     print('\n{} set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         set, test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
@@ -87,7 +80,7 @@ def run(args):
     transform_test = transforms.Compose([transforms.ToTensor(),
                                         transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
                                         ])
-    # TODO: adjust folder
+    # adjust folder
     dataset = datasets.CIFAR10('./data', download=True, train=True, transform=transform_train)
     trainset, valset = torch.utils.data.random_split(dataset, [int(len(dataset)*0.9), len(dataset)-int(len(dataset)*0.9)])
 
@@ -98,7 +91,6 @@ def run(args):
     valloader = DataLoader(valset, batch_size=args.batch_size, shuffle=False)
 
     # Download and load the test data
-    # TODO: adjust folder
     testset = datasets.CIFAR10('./data', download=True, train=False, transform=transform_test)
     testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
@@ -139,8 +131,6 @@ def run(args):
     best_model_path = os.path.join(model_dir, f'checkpoint_{args.model}.pt')
 
     # --- Epoch Loop ---
-    # You could also wrap this loop in tqdm(range(1, args.epochs + 1), desc='Total Progress')
-    # But the bars for train/val inside the loop are often more informative.
     for epoch in range(1, args.epochs + 1):
         train(model, trainloader, optimizer, criterion, device, epoch, args)
         val_accuracy = test(model, device, valloader, criterion, set="Validation")
