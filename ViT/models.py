@@ -77,7 +77,7 @@ class Attention(nn.Module):
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim = 1) 
         
-        # TODO: attention
+        # attention
         q = self.q(x)
         k = self.k(context)
         v = self.v(context)
@@ -85,6 +85,7 @@ class Attention(nn.Module):
         # rearrange for multi head attention
         # x has shape: [b, n, (h,d)]
         # to compute attention we need [b, h, n, d]
+        # makes "parallel computation of attn possible"
         q = rearrange(q, 'b n (h d) -> b h n d', h = h)
         k = rearrange(k, 'b m (h d) -> b h m d', h = h)
         v = rearrange(v, 'b m (h d) -> b h m d', h = h)
