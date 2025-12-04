@@ -51,10 +51,12 @@ class Attention(nn.Module):
         # as well as the q linear layer
         # and the k/v linear layer (can be realized as one single linear layer
         # or as two individual ones)
+        # blow up dimension to [batch, token, dim_head*num_heads]
         self.q = nn.Linear(dim, dim_head*self.heads, bias=False)
         self.k = nn.Linear(dim, dim_head*self.heads, bias=False)
         self.v = nn.Linear(dim, dim_head*self.heads, bias=False)     
         # and the output linear layer followed by dropout
+        # compress back to original dimension
         self.output = nn.Sequential(
             nn.Linear(dim_head*self.heads, dim),
             nn.Dropout(dropout)
@@ -68,7 +70,8 @@ class Attention(nn.Module):
         # don't forget the dropout after the attention 
         # and before the multiplication w. 'v'
         # the output should be in the shape 'b n (h d)'
-        # [batch_size, num_tokens, heads, dim_head]
+        
+        # x input shape: [batch, num_tokens, dim] (e.g. [16, 17, 64])
         b, n, _, h = *x.shape, self.heads
         if context is None:
             context = x
@@ -77,29 +80,42 @@ class Attention(nn.Module):
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim = 1) 
         
-        # TODO: attention
+        # attention
+        # project to Q, K, V
+        # Input: [b, n, dim]
+        # Output: [b, n, (h*d)]
         q = self.q(x)
         k = self.k(context)
         v = self.v(context)
 
-        # rearrange for multi head attention
-        # x has shape: [b, n, (h,d)]
-        # to compute attention we need [b, h, n, d]
+        # split heads for multi head attn
+        # Input: [b, n, (h d)] (16, 17, 512)
+        # Output: [b, h, n, d] (16, 8, 17, 64)
         q = rearrange(q, 'b n (h d) -> b h n d', h = h)
         k = rearrange(k, 'b m (h d) -> b h m d', h = h)
         v = rearrange(v, 'b m (h d) -> b h m d', h = h)
 
+        # calculate attn scores (scaled dot product)
+        # q: [b, h, n, d] @ k: [b, h, m, d] --> dots: [b, h, n, m]
         dots = einsum('b h n d, b h m d -> b h n m', q, k) / self.scale
         attn = self.dropout(self.softmax(dots))
 
-        # store attention map
+        # store attention map for visualization
         self.attn = attn
 
-        # (b h n m) @ (b h m d) --> (b h n d)
+        # apply attn to values
+        # attn: [b, h, n, m] @ v: [b, h, m, d] --> out: [b, h, n, d]
         out = einsum('b h n m, b h m d -> b h n d', attn, v)
-        # rearrange back to (b n (h d))
+
+        # combine heads
+        # Input: [b, h, n, d]
+        # Output: [b, n, (h d)]
         out = rearrange(out, 'b h n d -> b n (h d)')
+
         # pass through output layer
+        # scale down to orignal dimension
+        # Input: [b, n, (h d)]
+        # Output: [b, n, dim]
         out = self.output(out)
 
         return out 
@@ -155,6 +171,7 @@ class ProjectInOut(nn.Module):
         x_projected = self.project_in(x)
 
         # pass everything to wrapped function
+        # self.fn wraps PreNorm + Attention later 
         out = self.fn(x_projected, *args, **kwargs)
 
         out_projected = self.project_out(out)
@@ -271,6 +288,7 @@ class ImageEmbedder(nn.Module):
             nn.LayerNorm(dim),
         )
         # create/initialize #dim-dimensional positional embedding (will be learned)
+        # for sequential data: sinusodial positional encoding
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         # create #dim cls tokens (for each patch embedding)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
@@ -280,11 +298,15 @@ class ImageEmbedder(nn.Module):
     def forward(self, img):
         # forward through patch embedding layer
         x = self.to_patch_embedding(img)
-        b, n, _ = x.shape
+        b, n, _ = x.shape # [batch b, num_patches n, embedding_dimension d]
         # concat class tokens
+        # every image in batch b gets assigned one cls token
+        # this is done by repeating the cls token b times
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        # and concatinating it with patches (dim 1)
         x = torch.cat((cls_tokens, x), dim=1)
         # and add positional embedding
+        # pos embedding is esentially a learnable table with n+1 (patches + cls) elements
         x += self.pos_embedding[:, :(n + 1)]
 
         return self.dropout(x)
@@ -326,11 +348,14 @@ class ViT(nn.Module):
 
         # decide if x is the mean of the embedding 
         # or the class token
+        # note: originally x.shape = [batch, token, dim]
+        # after pool: x.shape = [batch, dim]
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
 
         # transfer via an identity layer the cls tokens or the mean
         # to a latent space, which can then be used as input
         # to the mlp head
+        # ? 
         x = self.to_latent(x)
 
         return self.mlp_head(x)
