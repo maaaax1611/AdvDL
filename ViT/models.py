@@ -288,6 +288,7 @@ class ImageEmbedder(nn.Module):
             nn.LayerNorm(dim),
         )
         # create/initialize #dim-dimensional positional embedding (will be learned)
+        # for sequential data: sinusodial positional encoding
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         # create #dim cls tokens (for each patch embedding)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
@@ -354,6 +355,7 @@ class ViT(nn.Module):
         # transfer via an identity layer the cls tokens or the mean
         # to a latent space, which can then be used as input
         # to the mlp head
+        # ? 
         x = self.to_latent(x)
 
         return self.mlp_head(x)
