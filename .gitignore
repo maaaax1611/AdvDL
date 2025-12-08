@@ -1,8 +1,10 @@
 data/*
 models/*
 results/*
+Diffusion/models/*
 __pycache__/*
 */__pycache__/*
 *.pdf
 *.yml
 *.txt
+epoch_*
