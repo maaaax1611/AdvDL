@@ -13,6 +13,12 @@ from ex02_helpers import *
 # Phil Wang (lucidrains): https://github.com/lucidrains/denoising-diffusion-pytorch (last access: 23.05.2023)
 
 class SinusoidalPositionEmbeddings(nn.Module):
+    """
+    Generate sinusodial positional embeddings
+    Formula:
+        PE_t,2i = sin(t/10000^(2i/d))
+        PE_t,2i+1 = cos(t/10000^(2i/d))
+    """
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -31,6 +37,11 @@ class WeightStandardizedConv2d(nn.Conv2d):
     """
     https://arxiv.org/abs/1903.10520
     weight standardization purportedly works synergistically with group normalization
+
+    Usually BN is used. BN required larger batch sizes. Batch sizes for training diff models are rather small
+    Solution: Normalize the weights of the Conv Kernel
+    Formula:
+        W_i_j_norm = (W_i_j - mean) / (std_dev + eps)
     """
 
     def forward(self, x):
@@ -66,6 +77,13 @@ class Block(nn.Module):
         x = self.norm(x)
 
         if exists(scale_shift):
+            # scale_shift comes from the time-embedding (see ResNet-Block)
+            # Here something called FiLM (Feature-wise linear Modulation) is implemented
+            # FiLM manipulates the statistical distribution of Feature Maps dependend on conditional embeddings (time and class embeddings)
+            # scale > 1: enhance feature contrast
+            # scale < 1: dampen feature contrast
+            # shift: works like a 'bias'
+            # scale + 1 gives us an identity when scale = 0; this should help the gradient flow at early training stages (i guess)          
             scale, shift = scale_shift
             x = x * (scale + 1) + shift
 
@@ -222,6 +240,8 @@ class Unet(nn.Module):
         num_resolutions = len(in_out)
 
         # TODO: Adapt all blocks accordingly such that they can accommodate a class embedding as well
+
+        # - ENCODER -
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
@@ -238,11 +258,13 @@ class Unet(nn.Module):
                 )
             )
 
+        # - BOTTLENECK -
         mid_dim = dims[-1]
         self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
         self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
 
+        # - DECODER -
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
             is_last = ind == (len(in_out) - 1)
 
@@ -279,6 +301,7 @@ class Unet(nn.Module):
 
         h = []
 
+        # - ENCODER -
         for block1, block2, attn, downsample in self.downs:
             x = block1(x, t)
             h.append(x)
@@ -289,10 +312,12 @@ class Unet(nn.Module):
 
             x = downsample(x)
 
+        # - BOTTLENECK -
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
 
+        # - DECODER -
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)

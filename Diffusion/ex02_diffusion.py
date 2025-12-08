@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn.functional as F
 from ex02_helpers import extract
 from tqdm import tqdm
@@ -112,21 +113,30 @@ class Diffusion:
             # Full equation: mean + sigma * z
             return model_mean + posterior_variance_t * noise
         
-    # Algorithm 2 (including returning all images)
+ 
     @torch.no_grad()
-    def sample(self, model, image_size, batch_size=16, channels=3):
+    def sample(self, model, image_size, batch_size=16, channels=3, return_all_timesteps = False):
         # TODO (2.2): Implement the full reverse diffusion loop from random noise to an image, iteratively ''reducing'' the noise in the generated image.
         # TODO (2.2): Return the generated images
         # we start with x_t ~ N(0, I): random normal noise
-        x = torch.randn((batch_size, channels, image_size, image_size), device=self.device)
-
+        img = torch.randn((batch_size, channels, image_size, image_size), device=self.device)
+        
+        # list to store intermediate steps
+        imgs = [img]
         # iterate backwards over all timesteps
-        for timestep in reversed(range(self.timesteps)):
-            # create tensor containing the current timestep for all samples in the batch
-            t = torch.full((batch_size,), timestep, device=self.device, dtype=torch.long)
-            x = self.p_sample(model, x, t, timestep)
+        for i in tqdm(reversed(range(0, self.timesteps)), desc='sampling loop time step', total=self.timesteps):
+            t = torch.full((batch_size,), i, device=self.device, dtype=torch.long)
+            img = self.p_sample(model, img, t, i)
+            
+            if return_all_timesteps:
+                imgs.append(img)
 
-        return x
+        if return_all_timesteps:
+            # Return the stack of all images: shape (timesteps+1, batch, c, h, w)
+            return torch.stack(imgs, dim=0)
+            
+        return img
+
 
     # forward diffusion (using the nice property)
     def q_sample(self, x_zero, t, noise=None):
