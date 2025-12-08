@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument('--save_model', action='store_true', default=False, help='For Saving the current Model')
     parser.add_argument('--run_name', type=str, default="DDPM")
     parser.add_argument('--dry_run', action='store_true', default=False, help='quickly check a single pass')
+    parser.add_argument('--test_only', action='store_true', default=False, help='run only inference/testing using a saved model')
     return parser.parse_args()
 
 
@@ -317,6 +318,9 @@ def train(model, trainloader, optimizer, diffusor, epoch, device, args):
         loss = diffusor.p_losses(model, images, t, loss_type="l2")
 
         loss.backward()
+        # apparently we get exploding gradients when using cosine schedule
+        # so we use gradient clipping to see if this gets better
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
         total_loss += loss.item()
@@ -338,32 +342,76 @@ def test(args):
     channels = 3
     print(f"--- Running Test on {device} ---")
 
+    # 1. Model Setup
     model = Unet(dim=image_size, channels=channels, dim_mults=(1, 2, 4,)).to(device)
-    # Ensure these match training!
-    my_scheduler = lambda x: linear_beta_schedule(0.0001, 0.02, x)
+    
+    # Wichtig: Cosine Schedule nutzen, da damit trainiert wurde
+    my_scheduler = cosine_beta_schedule
     diffusor = Diffusion(args.timesteps, my_scheduler, image_size, device)
 
-    ckpt_path = os.path.join(f"./models/{args.run_name}", "ckpt.pt")
+    # 2. Checkpoint laden
+    ckpt_dir = f"./models/{args.run_name}"
+    ckpt_path = os.path.join(ckpt_dir, "ckpt_best.pt")
+    if not os.path.exists(ckpt_path):
+        ckpt_path = os.path.join(ckpt_dir, "ckpt_last.pt")
+
     if os.path.exists(ckpt_path):
         print(f"Loading checkpoint: {ckpt_path}")
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
     else:
-        print(f"WARNING: No checkpoint found at {ckpt_path}. Testing with random weights.")
+        print(f"WARNING: No checkpoint found at {ckpt_dir}. Testing with random weights.")
+        return # Macht keinen Sinn ohne Model weiterzumachen
 
+    # 3. Transforms
     transform = Compose([
         transforms.ToTensor(),
         transforms.Lambda(lambda t: (t * 2) - 1)
     ])
-    # Local path ./data
+    
+    # Reverse Transform für die schöne Darstellung
+    reverse_transform = Compose([
+        Lambda(lambda t: (t.clamp(-1, 1) + 1) / 2),
+        Lambda(lambda t: t.permute(1, 2, 0)),
+        Lambda(lambda t: t * 255.),
+        Lambda(lambda t: t.numpy().astype(np.uint8)),
+        ToPILImage(),
+    ])
+
+    # 4. Daten laden
     testset = datasets.CIFAR10('./data', download=True, train=False, transform=transform)
     testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
-    avg_loss = evaluate(model, testloader, diffusor, device, args)
-    print(f"Test Set Average Loss: {avg_loss:.6f}")
-
-    save_path = f"./results/{args.run_name}/test_samples.png"
-    sample_and_save_images(n_images=16, diffusor=diffusor, model=model, device=device, store_path=save_path)
-    print(f"Test samples saved to {save_path}")
+    # --- NEU: Echte Bilder holen für den Vergleich ---
+    print("Fetching real images for comparison...")
+    real_batch, real_labels = next(iter(testloader))
+    
+    # 5. Generieren & Speichern
+    
+    # A) Das normale Grid
+    save_path_grid = f"./results/{args.run_name}/test_samples_grid.png"
+    sample_and_save_images(
+        n_images=16, 
+        diffusor=diffusor, 
+        model=model, 
+        device=device, 
+        store_path=save_path_grid, 
+        transform=reverse_transform
+    )
+    
+    # B) Der Comparison Plot (Oben Real / Unten Fake)
+    save_path_comp = f"./results/{args.run_name}/test_samples_comparison.png"
+    comparison_plot(
+        diffusor=diffusor,
+        model=model,
+        device=device,
+        real_batch=real_batch,
+        real_labels=real_labels,
+        store_path=save_path_comp,
+        epoch="TEST", # Label für den Plot
+        transform=reverse_transform
+    )
+    
+    print(f"Done! Images saved to ./results/{args.run_name}/")
 
 
 def run(args):
@@ -467,4 +515,7 @@ def run(args):
 if __name__ == '__main__':
     args = parse_args()
     # TODO (2.2): Add visualization capabilities
-    run(args)
+    if args.test_only:
+        test(args)
+    else:
+        run(args)

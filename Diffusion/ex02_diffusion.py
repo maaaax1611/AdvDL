@@ -23,7 +23,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0.0001, 0.9999)
+    return torch.clip(betas, 0.0001, 0.02)
 
 
 def sigmoid_beta_schedule(beta_start, beta_end, timesteps):
@@ -128,6 +128,8 @@ class Diffusion:
             t = torch.full((batch_size,), i, device=self.device, dtype=torch.long)
             img = self.p_sample(model, img, t, i)
             
+            #img = torch.clamp(img, -3.0, 3.0)
+
             if return_all_timesteps:
                 imgs.append(img)
 

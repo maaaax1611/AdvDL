@@ -3,14 +3,15 @@ import torch
 import os
 from numpy.testing import assert_almost_equal
 
-from ex02_diffusion import Diffusion, linear_beta_schedule
+from ex02_diffusion import Diffusion, linear_beta_schedule, cosine_beta_schedule
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class TestDiffusionModel(unittest.TestCase):
     def setUp(self):
         self.test_values = torch.load("ex02_test_values.pt")
-        self.scheduler = lambda x: linear_beta_schedule(0.001, 0.02, x)
+        #self.scheduler = lambda x: linear_beta_schedule(0.001, 0.02, x)
+        self.scheduler = cosine_beta_schedule
         self.img_size = 32
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
