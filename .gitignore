@@ -4,6 +4,7 @@ results/*
 Diffusion/models/*
 __pycache__/*
 */__pycache__/*
+__init__.py
 *.pdf
 *.yml
 *.txt
