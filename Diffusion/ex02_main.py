@@ -13,7 +13,7 @@ import os
 import matplotlib.pyplot as plt
 
 from ex02_model import Unet
-from ex02_diffusion import Diffusion, linear_beta_schedule
+from ex02_diffusion import Diffusion, linear_beta_schedule, cosine_beta_schedule, sigmoid_beta_schedule
 from torchvision.utils import save_image, make_grid
 
 import argparse
@@ -37,28 +37,131 @@ def parse_args():
     return parser.parse_args()
 
 
+# def save_diffusion_animation(diffusor, model, device, store_path, n_images=4):
+#     """
+#     Generates a GIF animation of the process. (Task 2.2 f - Optional)
+#     """
+#     model.eval()
+#     os.makedirs(os.path.dirname(store_path), exist_ok=True)
+    
+#     # Needs return_all_timesteps implemented in Diffusion.sample
+#     with torch.no_grad():
+#         # Check if sample supports return_all_timesteps (it should if you implemented it)
+#         try:
+#             all_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3, return_all_timesteps=True)
+#         except TypeError:
+#             print("Warning: return_all_timesteps not implemented in Diffusion.sample yet. Skipping animation.")
+#             return
+
+#     # Post-processing
+#     all_images = (all_images + 1) * 0.5
+#     all_images = all_images.clamp(0, 1)
+    
+#     frames = []
+#     step_size = 10 if all_images.shape[0] > 200 else 1 # Downsample frames
+    
+#     for t in range(0, all_images.shape[0], step_size):
+#         batch_t = all_images[t]
+#         grid = make_grid(batch_t, nrow=int(np.sqrt(n_images)), padding=2)
+#         ndarr = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+#         frames.append(Image.fromarray(ndarr))
+        
+#     if frames:
+#         frames[0].save(store_path, save_all=True, append_images=frames[1:], duration=20, loop=0)
+
+
+
+# def sample_and_save_images(n_images, diffusor, model, device, store_path):
+#     # TODO: Implement - adapt code and method signature as needed
+#     model.eval()
+
+#     os.makedirs(os.path.dirname(store_path), exist_ok=True)
+
+#     print(f"Sampling {n_images} images...")
+#     with torch.no_grad():
+#         sampled_images = diffusor.sample(
+#             model=model,
+#             image_size=diffusor.img_size,
+#             batch_size=n_images,
+#             channels=3
+#         )
+#         # we need to do some postprocessing
+#         # images should be in [-1, 1] so map them back to [0, 1] for saving
+#         sampled_images = (sampled_images + 1) * 0.5
+#         sampled_images = sampled_images.clamp(0, 1)
+
+#         # save them as a grid
+#         save_image(sampled_images, store_path, nrow=int(np.sqrt(n_images)))
+
+#     print(f"Images saved to {store_path}")
+
+
+# def comparison_plot(diffusor, model, device, real_batch, real_labels, store_path, epoch=None):
+#     """
+#     Saves a plot comparing Real Images (Top) vs. Generated Images (Bottom).
+#     Includes Class Labels for Real Images.
+#     """
+#     model.eval()
+#     n_images = 8  # Wir zeigen 8 echte und 8 generierte
+    
+#     # 1. Generieren
+#     with torch.no_grad():
+#         fake_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3)
+    
+#     # Post-processing ([-1, 1] -> [0, 1])
+#     fake_images = (fake_images + 1) * 0.5
+#     fake_images = fake_images.clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy() # (B, H, W, C)
+    
+#     # Real Images vorbereiten (wir nehmen die ersten n_images vom Batch)
+#     real_images = real_batch[:n_images].to(device)
+#     real_images = (real_images + 1) * 0.5
+#     real_images = real_images.clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy()
+    
+#     real_labels = real_labels[:n_images].cpu().numpy()
+
+#     # 2. Plotting mit Matplotlib
+#     fig, axes = plt.subplots(2, n_images, figsize=(n_images * 2, 5))
+    
+#     # Titel für das ganze Bild
+#     title = f"Epoch {epoch}" if epoch is not None else "Final Samples"
+#     fig.suptitle(f'Top: Real Data | Bottom: Generated (Unconditional) - {title}', fontsize=16)
+
+#     for i in range(n_images):
+#         # --- Top Row: Real Images ---
+#         axes[0, i].imshow(real_images[i])
+#         axes[0, i].set_title(CLASSES[real_labels[i]])
+#         axes[0, i].axis('off')
+
+#         # --- Bottom Row: Generated Images ---
+#         axes[1, i].imshow(fake_images[i])
+#         axes[1, i].set_title("Generated")
+#         axes[1, i].axis('off')
+
+#     plt.tight_layout()
+#     plt.savefig(store_path)
+#     plt.close()
+#     print(f"Comparison plot saved to {store_path}")
+
 def save_diffusion_animation(diffusor, model, device, store_path, n_images=4):
     """
-    Generates a GIF animation of the process. (Task 2.2 f - Optional)
+    Generates a GIF animation of the process.
     """
     model.eval()
     os.makedirs(os.path.dirname(store_path), exist_ok=True)
     
-    # Needs return_all_timesteps implemented in Diffusion.sample
     with torch.no_grad():
-        # Check if sample supports return_all_timesteps (it should if you implemented it)
         try:
             all_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3, return_all_timesteps=True)
         except TypeError:
-            print("Warning: return_all_timesteps not implemented in Diffusion.sample yet. Skipping animation.")
+            print("Warning: return_all_timesteps not implemented. Skipping animation.")
             return
 
-    # Post-processing
+    # Post-processing for animation (keeping simple manual clamp here for speed on tensor batches)
     all_images = (all_images + 1) * 0.5
     all_images = all_images.clamp(0, 1)
     
     frames = []
-    step_size = 10 if all_images.shape[0] > 200 else 1 # Downsample frames
+    step_size = 10 if all_images.shape[0] > 200 else 1
     
     for t in range(0, all_images.shape[0], step_size):
         batch_t = all_images[t]
@@ -70,13 +173,14 @@ def save_diffusion_animation(diffusor, model, device, store_path, n_images=4):
         frames[0].save(store_path, save_all=True, append_images=frames[1:], duration=20, loop=0)
 
 
-
-def sample_and_save_images(n_images, diffusor, model, device, store_path):
-    # TODO: Implement - adapt code and method signature as needed
+def sample_and_save_images(n_images, diffusor, model, device, store_path, transform=None):
+    """
+    Samples images and uses the provided 'transform' to convert them to PIL images,
+    then stitches them into a grid.
+    """
     model.eval()
-
     os.makedirs(os.path.dirname(store_path), exist_ok=True)
-
+    
     print(f"Sampling {n_images} images...")
     with torch.no_grad():
         sampled_images = diffusor.sample(
@@ -85,56 +189,72 @@ def sample_and_save_images(n_images, diffusor, model, device, store_path):
             batch_size=n_images,
             channels=3
         )
-        # we need to do some postprocessing
-        # images should be in [-1, 1] so map them back to [0, 1] for saving
-        sampled_images = (sampled_images + 1) * 0.5
-        sampled_images = sampled_images.clamp(0, 1)
-
-        # save them as a grid
-        save_image(sampled_images, store_path, nrow=int(np.sqrt(n_images)))
+        
+        # Use the specific reverse_transform provided
+        if transform is not None:
+            # transform expects a single image (C,H,W), so we iterate
+            pil_images = [transform(img.cpu()) for img in sampled_images]
+            
+            # Manually stitch PIL images into a grid
+            rows = int(np.sqrt(n_images))
+            cols = n_images // rows
+            w, h = pil_images[0].size
+            grid = Image.new('RGB', size=(cols*w, rows*h))
+            
+            for i, img in enumerate(pil_images):
+                grid.paste(img, box=(i % cols * w, i // cols * h))
+            
+            grid.save(store_path)
+        else:
+            # Fallback if no transform provided
+            sampled_images = (sampled_images + 1) * 0.5
+            save_image(sampled_images, store_path, nrow=int(np.sqrt(n_images)))
 
     print(f"Images saved to {store_path}")
 
 
-def comparison_plot(diffusor, model, device, real_batch, real_labels, store_path, epoch=None):
+def comparison_plot(diffusor, model, device, real_batch, real_labels, store_path, epoch=None, transform=None):
     """
     Saves a plot comparing Real Images (Top) vs. Generated Images (Bottom).
-    Includes Class Labels for Real Images.
+    Uses 'transform' to convert tensors to PIL images for plotting.
     """
     model.eval()
-    n_images = 8  # Wir zeigen 8 echte und 8 generierte
+    n_images = 8
     
-    # 1. Generieren
+    # 1. Generate
     with torch.no_grad():
         fake_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3)
     
-    # Post-processing ([-1, 1] -> [0, 1])
-    fake_images = (fake_images + 1) * 0.5
-    fake_images = fake_images.clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy() # (B, H, W, C)
-    
-    # Real Images vorbereiten (wir nehmen die ersten n_images vom Batch)
-    real_images = real_batch[:n_images].to(device)
-    real_images = (real_images + 1) * 0.5
-    real_images = real_images.clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy()
-    
-    real_labels = real_labels[:n_images].cpu().numpy()
-
-    # 2. Plotting mit Matplotlib
+    # 2. Plotting
     fig, axes = plt.subplots(2, n_images, figsize=(n_images * 2, 5))
     
-    # Titel für das ganze Bild
     title = f"Epoch {epoch}" if epoch is not None else "Final Samples"
-    fig.suptitle(f'Top: Real Data | Bottom: Generated (Unconditional) - {title}', fontsize=16)
+    fig.suptitle(f'Top: Real Data | Bottom: Generated (Cosine) - {title}', fontsize=16)
 
     for i in range(n_images):
         # --- Top Row: Real Images ---
-        axes[0, i].imshow(real_images[i])
-        axes[0, i].set_title(CLASSES[real_labels[i]]) # Hier kommt das Label!
+        # Use the reverse_transform
+        if transform:
+            real_img_pil = transform(real_batch[i].cpu())
+            axes[0, i].imshow(real_img_pil)
+        else:
+            # Fallback
+            real_img = (real_batch[i] + 1) * 0.5
+            axes[0, i].imshow(real_img.cpu().permute(1, 2, 0).numpy())
+            
+        axes[0, i].set_title(CLASSES[real_labels[i]])
         axes[0, i].axis('off')
 
         # --- Bottom Row: Generated Images ---
-        axes[1, i].imshow(fake_images[i])
-        axes[1, i].set_title("Generated") # Unconditional hat kein Label
+        if transform:
+            fake_img_pil = transform(fake_images[i].cpu())
+            axes[1, i].imshow(fake_img_pil)
+        else:
+            # Fallback
+            fake_img = (fake_images[i] + 1) * 0.5
+            axes[1, i].imshow(fake_img.cpu().permute(1, 2, 0).numpy())
+            
+        axes[1, i].set_title("Generated")
         axes[1, i].axis('off')
 
     plt.tight_layout()
@@ -200,11 +320,8 @@ def train(model, trainloader, optimizer, diffusor, epoch, device, args):
         optimizer.step()
 
         total_loss += loss.item()
+        pbar.set_description(f"Epoch {epoch} | Loss: {loss.item():.4f}")
 
-        if step % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, step * len(images), len(trainloader.dataset),
-                100. * step / len(trainloader), loss.item()))
         if args.dry_run:
             break
 
@@ -264,7 +381,8 @@ def run(args):
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
     # Diffusion setup
-    my_scheduler = lambda x: linear_beta_schedule(0.0001, 0.02, x)
+    #my_scheduler = lambda x: linear_beta_schedule(0.0001, 0.02, x)
+    my_scheduler = cosine_beta_schedule
     diffusor = Diffusion(timesteps, my_scheduler, image_size, device)
 
     # define image transformations (e.g. using torchvision)
@@ -320,11 +438,11 @@ def run(args):
         # save imgs
         # sample random images and save them as a plot
         grid_path = f"./results/{args.run_name}/epoch_{epoch}_grid.png"
-        sample_and_save_images(n_images=9, diffusor=diffusor, model=model, device=device, store_path=grid_path)
+        sample_and_save_images(n_images=9, diffusor=diffusor, model=model, device=device, store_path=grid_path, transform=reverse_transform)
 
         # create a coparison plot original images vs. generated images
         comp_path = f"./results/{args.run_name}/epoch_{epoch}_comparison.png"
-        comparison_plot(diffusor, model, device, fix_real_images, fix_real_labels, comp_path, epoch=epoch)
+        comparison_plot(diffusor, model, device, fix_real_images, fix_real_labels, comp_path, epoch=epoch, transform=reverse_transform)
 
         # Checkpoint strategy:
         # always safe the current state of the model
