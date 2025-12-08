@@ -123,11 +123,9 @@ def comparison_plot(diffusor, model, device, real_batch, real_labels, store_path
     model.eval()
     n_images = 8
     
-    # 1. Generate
     with torch.no_grad():
         fake_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3)
     
-    # 2. Plotting
     fig, axes = plt.subplots(2, n_images, figsize=(n_images * 2, 5))
     
     title = f"Epoch {epoch}" if epoch is not None else "Final Samples"
@@ -182,7 +180,6 @@ def loss_plot(train_losses, val_losses, store_path):
 
 
 def evaluate(model, testloader, diffusor, device, args):
-    # TODO: Implement - adapt code and method signature as needed
     model.eval()
     total_loss = 0
 
@@ -265,7 +262,6 @@ def test(args):
         transforms.Lambda(lambda t: (t * 2) - 1)
     ])
     
-    # Reverse Transform für die schöne Darstellung
     reverse_transform = Compose([
         Lambda(lambda t: (t.clamp(-1, 1) + 1) / 2),
         Lambda(lambda t: t.permute(1, 2, 0)),
@@ -427,7 +423,6 @@ def run(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    # TODO (2.2): Add visualization capabilities
     if args.test_only:
         test(args)
     else:

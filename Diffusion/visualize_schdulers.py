@@ -4,16 +4,12 @@ import numpy as np
 from ex02_diffusion import linear_beta_schedule, cosine_beta_schedule, sigmoid_beta_schedule
 
 def test_schedulers():
-    timesteps = 1000  # Dein Setup
+    timesteps = 1000
     
-    # 1. Berechne Betas für alle Schedules
     betas_linear = linear_beta_schedule(0.0001, 0.02, timesteps)
     betas_cosine = cosine_beta_schedule(timesteps)
     betas_sigmoid = sigmoid_beta_schedule(0.0001, 0.02, timesteps) # Falls implementiert
 
-    # 2. Berechne Alphas Cumprod (Das ist wichtig für das Signal-Rausch-Verhältnis)
-    # alpha = 1 - beta
-    # alpha_bar = cumprod(alpha)
     
     def get_alphas_cumprod(betas):
         alphas = 1. - betas
@@ -27,7 +23,6 @@ def test_schedulers():
     # --- PLOTTING ---
     plt.figure(figsize=(12, 6))
 
-    # Plot 1: Betas (Wie viel Rauschen kommt pro Schritt dazu?)
     plt.subplot(1, 2, 1)
     plt.plot(betas_linear.numpy(), label='Linear', linestyle='--')
     plt.plot(betas_cosine.numpy(), label='Cosine')
@@ -38,7 +33,6 @@ def test_schedulers():
     plt.legend()
     plt.grid(True)
 
-    # Plot 2: Alphas Cumprod (Wieviel "Originalbild" ist noch übrig?)
     plt.subplot(1, 2, 2)
     plt.plot(alphas_bar_lin.numpy(), label='Linear', linestyle='--')
     plt.plot(alphas_bar_cos.numpy(), label='Cosine')
@@ -53,19 +47,5 @@ def test_schedulers():
     plt.savefig("scheduler_comparison.png")
     plt.show()
 
-    # --- KRITISCHE WERTE PRÜFEN ---
-    print(f"--- Check numerische Stabilität (T={timesteps}) ---")
-    
-    print(f"\nLINEAR:")
-    print(f"  Min Beta: {betas_linear.min().item():.6f}")
-    print(f"  Max Beta: {betas_linear.max().item():.6f}")
-    print(f"  Final Alpha_Bar (sollte > 0 sein): {alphas_bar_lin[-1].item():.10f}")
-
-    print(f"\nCOSINE:")
-    print(f"  Min Beta: {betas_cosine.min().item():.6f}")
-    print(f"  Max Beta: {betas_cosine.max().item():.6f} (WICHTIG: Sollte < 0.999 sein!)")
-    print(f"  Final Alpha_Bar: {alphas_bar_cos[-1].item():.10f}")
-    
-    
 if __name__ == "__main__":
     test_schedulers()
