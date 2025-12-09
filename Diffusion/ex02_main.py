@@ -35,137 +35,116 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default="DDPM")
     parser.add_argument('--dry_run', action='store_true', default=False, help='quickly check a single pass')
     parser.add_argument('--test_only', action='store_true', default=False, help='run only inference/testing using a saved model')
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['linear', 'cosine', 'sigmoid'], help='type of noise schedule to use (linear, cosine, sigmoid)')
+    parser.add_argument('--guidance_scale', type=float, default=2.0, help='scale for classifier-free guidance during sampling')
+    parser.add_argument('--unconditional', action='store_true', default=False, help='if set, trains a standard unconditional model without classes')
     return parser.parse_args()
 
 
-def save_diffusion_animation(diffusor, model, device, store_path, reverse_transform, n_images=4):
+def get_scheduler(name):
     """
-    Generates a GIF animation using the provided reverse_transform for consistency.
+    Returns the scheduler function based on the string name.
     """
-    print(f"Generating animation to {store_path}...")
+    if name == "linear":
+        return lambda x: linear_beta_schedule(0.0001, 0.02, x)
+    elif name == "cosine":
+        return cosine_beta_schedule
+    elif name == "sigmoid":
+        return lambda x: sigmoid_beta_schedule(0.0001, 0.02, x)
+    else:
+        raise ValueError(f"Unknown scheduler: {name}")
+
+
+def plot_labeled_grid(diffusor, model, device, store_path, n_images=16, transform=None, guidance_scale=2.0):
+    """
+    Generates a grid containing generated images and labels
+    """
     model.eval()
     
+    rows = int(np.sqrt(n_images))
+    cols = int(np.ceil(n_images / rows))
+    
+    labels = torch.randint(0, 10, (n_images,), device=device).long()
+    
     with torch.no_grad():
-        # x_seq shape: [Timesteps+1, Batch, C, H, W]
-        x_seq = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3, return_all_timesteps=True)
+        images = diffusor.sample(
+            model=model,
+            image_size=diffusor.img_size,
+            batch_size=n_images,
+            channels=3,
+            classes=labels,
+            guidance_scale=guidance_scale
+        )
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2.2))
+    axes = axes.flatten()
+    
+    fig.suptitle(f'Generated Samples (Scale: {guidance_scale})', fontsize=16)
+
+    for i in range(n_images):
+        ax = axes[i]
+        if transform:
+            img_pil = transform(images[i].cpu())
+            ax.imshow(img_pil)
+        else:
+            img = (images[i].cpu().permute(1, 2, 0) + 1) * 0.5
+            img = img.clamp(0, 1).numpy()
+            ax.imshow(img)
+            
+        class_name = CLASSES[labels[i].item()]
+        ax.set_title(class_name, fontsize=10)
+        ax.axis('off')
+
+    for i in range(n_images, len(axes)):
+        axes[i].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(store_path)
+    plt.close()
+    print(f"Labeled grid saved to {store_path}")
+
+
+def save_diffusion_animation(diffusor, model, device, store_path, reverse_transform, n_images=4, guidance_scale=2.0):
+    """
+    Generate a GIF to visualize sampling
+    """
+    model.eval()
+    demo_classes = torch.randint(0, 10, (n_images,), device=device).long()
+
+    with torch.no_grad():
+        x_seq = diffusor.sample(
+            model, 
+            image_size=diffusor.img_size, 
+            batch_size=n_images, 
+            channels=3, 
+            return_all_timesteps=True,
+            classes=demo_classes,
+            guidance_scale=guidance_scale
+        )
     
     frames = []
     step_size = max(1, len(x_seq) // 50)
     
-    rows = int(np.sqrt(n_images))
-    cols = n_images // rows
-    
     for i in range(0, len(x_seq), step_size):
-        batch_t = x_seq[i] # (Batch, C, H, W)
-        
+        batch_t = x_seq[i]
         pil_images = [reverse_transform(img.cpu()) for img in batch_t]
         
+        # Grid construction logic simplified for animation
         w, h = pil_images[0].size
-        
+        rows = int(np.sqrt(n_images))
+        cols = n_images // rows
         grid = Image.new('RGB', size=(cols*w, rows*h))
-        
         for j, img in enumerate(pil_images):
             grid.paste(img, box=(j % cols * w, j // cols * h))
-            
         frames.append(grid)
 
     if frames:
         frames.extend([frames[-1]] * 10)
         frames[0].save(store_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
-        print("Animation saved.")
-
-
-def sample_and_save_images(n_images, diffusor, model, device, store_path, transform=None):
-    """
-    Samples images and uses the provided 'transform' to convert them to PIL images,
-    then stitches them into a grid.
-    """
-    model.eval()
-    os.makedirs(os.path.dirname(store_path), exist_ok=True)
-    
-    print(f"Sampling {n_images} images...")
-    with torch.no_grad():
-        sampled_images = diffusor.sample(
-            model=model,
-            image_size=diffusor.img_size,
-            batch_size=n_images,
-            channels=3
-        )
-        
-        # Use the specific reverse_transform provided
-        if transform is not None:
-            # transform expects a single image (C,H,W), so we iterate
-            pil_images = [transform(img.cpu()) for img in sampled_images]
-            
-            # Manually stitch PIL images into a grid
-            rows = int(np.sqrt(n_images))
-            cols = n_images // rows
-            w, h = pil_images[0].size
-            grid = Image.new('RGB', size=(cols*w, rows*h))
-            
-            for i, img in enumerate(pil_images):
-                grid.paste(img, box=(i % cols * w, i // cols * h))
-            
-            grid.save(store_path)
-        else:
-            # Fallback if no transform provided
-            sampled_images = (sampled_images + 1) * 0.5
-            save_image(sampled_images, store_path, nrow=int(np.sqrt(n_images)))
-
-    print(f"Images saved to {store_path}")
-
-
-def comparison_plot(diffusor, model, device, real_batch, real_labels, store_path, epoch=None, transform=None):
-    """
-    Saves a plot comparing Real Images (Top) vs. Generated Images (Bottom).
-    Uses 'transform' to convert tensors to PIL images for plotting.
-    """
-    model.eval()
-    n_images = 8
-    
-    with torch.no_grad():
-        fake_images = diffusor.sample(model, image_size=diffusor.img_size, batch_size=n_images, channels=3)
-    
-    fig, axes = plt.subplots(2, n_images, figsize=(n_images * 2, 5))
-    
-    title = f"Epoch {epoch}" if epoch is not None else "Final Samples"
-    fig.suptitle(f'Top: Real Data | Bottom: Generated (Cosine) - {title}', fontsize=16)
-
-    for i in range(n_images):
-        # --- Top Row: Real Images ---
-        # Use the reverse_transform
-        if transform:
-            real_img_pil = transform(real_batch[i].cpu())
-            axes[0, i].imshow(real_img_pil)
-        else:
-            # Fallback
-            real_img = (real_batch[i] + 1) * 0.5
-            axes[0, i].imshow(real_img.cpu().permute(1, 2, 0).numpy())
-            
-        axes[0, i].set_title(CLASSES[real_labels[i]])
-        axes[0, i].axis('off')
-
-        # --- Bottom Row: Generated Images ---
-        if transform:
-            fake_img_pil = transform(fake_images[i].cpu())
-            axes[1, i].imshow(fake_img_pil)
-        else:
-            # Fallback
-            fake_img = (fake_images[i] + 1) * 0.5
-            axes[1, i].imshow(fake_img.cpu().permute(1, 2, 0).numpy())
-            
-        axes[1, i].set_title("Generated")
-        axes[1, i].axis('off')
-
-    plt.tight_layout()
-    plt.savefig(store_path)
-    plt.close()
-    print(f"Comparison plot saved to {store_path}")
-
 
 def loss_plot(train_losses, val_losses, store_path):
     """
-    Plots the training and validation loss curves.
+    Generate loss plot
     """
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label="Train Loss", color='blue')
@@ -180,19 +159,31 @@ def loss_plot(train_losses, val_losses, store_path):
 
 
 def evaluate(model, testloader, diffusor, device, args):
+    """
+    Calculate validation loss
+    """
     model.eval()
     total_loss = 0
 
     with torch.no_grad():
-        for step, (images, _) in enumerate(testloader):
+        for step, (images, labels) in enumerate(testloader):
             images = images.to(device)
+            labels = labels.to(device)
 
             # sample random timesteps t
             t = torch.randint(0, args.timesteps, (len(images),), device=device).long()
 
             # calc loss
             # use p_losses method (copy from training)
-            loss = diffusor.p_losses(model, images, t, loss_type ="l2")
+            loss = diffusor.p_losses(
+                denoise_model=model,
+                x_zero=images,
+                t=t,
+                noise=None, # we want to generate random noise in eval (see p_losses)
+                loss_type='l2',
+                classes=labels,
+                cond_drop_prob=0.0 # no label dropout during eval
+            )
             total_loss += loss.item()
 
     avg_loss = total_loss / len(testloader)
@@ -201,24 +192,39 @@ def evaluate(model, testloader, diffusor, device, args):
 
 
 def train(model, trainloader, optimizer, diffusor, epoch, device, args):
-    batch_size = args.batch_size
-    timesteps = args.timesteps
+    """
+    Training loop
+    """
+    model.train()
     total_loss = 0
-
     pbar = tqdm(trainloader)
+    
+    # Check if we want to train strictly unconditionally
+    use_classes = not args.unconditional
+    
     for step, (images, labels) in enumerate(pbar):
-
         images = images.to(device)
+        labels = labels.to(device) if use_classes else None
         optimizer.zero_grad()
 
-        # Algorithm 1 line 3: sample t uniformly for every example in the batch
-        t = torch.randint(0, timesteps, (len(images),), device=device).long()
-        loss = diffusor.p_losses(model, images, t, loss_type="l2")
+        t = torch.randint(0, args.timesteps, (len(images),), device=device).long()
+        
+        # If unconditional: classes=None, prob=0.0
+        # If conditional: classes=labels, prob=0.1
+        drop_prob = 0.1 if use_classes else 0.0
+        
+        loss = diffusor.p_losses(
+            denoise_model=model, 
+            x_zero=images, 
+            t=t, 
+            loss_type="l2",
+            classes=labels,
+            cond_drop_prob=drop_prob 
+        )
 
         loss.backward()
-        # apparently we get exploding gradients when using cosine schedule
-        # so we use gradient clipping to see if this gets better
-        #torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Apparently cosine schedule produced exploding gradients (or smth. like this)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
         total_loss += loss.item()
@@ -227,22 +233,25 @@ def train(model, trainloader, optimizer, diffusor, epoch, device, args):
         if args.dry_run:
             break
 
-    avg_loss = total_loss / len(trainloader)
-    return avg_loss
+    return total_loss / len(trainloader)
 
 
 def test(args):
     """
-    Standalone test function (Task 2.2 e)
+    Standalone test function
     """
     device = "cuda" if not args.no_cuda and torch.cuda.is_available() else "cpu"
     image_size = 32
     channels = 3
     print(f"--- Running Test on {device} ---")
+    print(f"Using Scheduler: {args.scheduler}")
+    print(f"Guidance Scale: {args.guidance_scale}")
 
-    model = Unet(dim=image_size, channels=channels, dim_mults=(1, 2, 4,)).to(device)
+    # Determine num_classes based on args
+    num_classes = None if args.unconditional else 10
+    model = Unet(dim=image_size, channels=channels, dim_mults=(1, 2, 4,), num_classes=num_classes).to(device)
     
-    my_scheduler = cosine_beta_schedule
+    my_scheduler = get_scheduler(args.scheduler)
     diffusor = Diffusion(args.timesteps, my_scheduler, image_size, device)
 
     ckpt_dir = f"./Diffusion/models/{args.run_name}"
@@ -257,11 +266,6 @@ def test(args):
         print(f"WARNING: No checkpoint found at {ckpt_dir}. Testing with random weights.")
         return
 
-    transform = Compose([
-        transforms.ToTensor(),
-        transforms.Lambda(lambda t: (t * 2) - 1)
-    ])
-    
     reverse_transform = Compose([
         Lambda(lambda t: (t.clamp(-1, 1) + 1) / 2),
         Lambda(lambda t: t.permute(1, 2, 0)),
@@ -270,47 +274,28 @@ def test(args):
         ToPILImage(),
     ])
 
-    testset = datasets.CIFAR10('./data', download=True, train=False, transform=transform)
-    testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
-
-    print("Fetching real images for comparison...")
-    real_batch, real_labels = next(iter(testloader))
-    
-    save_path_grid = f"./Diffusion/results/{args.run_name}/test_samples_grid.png"
-    sample_and_save_images(
-        n_images=16, 
+    save_path = f"./Diffusion/results/{args.run_name}/test_samples_labeled_scale{args.guidance_scale}.png"
+    plot_labeled_grid(
         diffusor=diffusor, 
         model=model, 
         device=device, 
-        store_path=save_path_grid, 
-        transform=reverse_transform
+        store_path=save_path, 
+        n_images=25, 
+        transform=reverse_transform, 
+        guidance_scale=args.guidance_scale
     )
     
-    save_path_comp = f"./Diffusion/results/{args.run_name}/test_samples_comparison.png"
-    comparison_plot(
-        diffusor=diffusor,
-        model=model,
-        device=device,
-        real_batch=real_batch,
-        real_labels=real_labels,
-        store_path=save_path_comp,
-        epoch="TEST",
-        transform=reverse_transform
-    )
-    
-    anim_path = f"./Diffusion/results/{args.run_name}/training_process.gif"
+    anim_path = f"./Diffusion/results/{args.run_name}/test_animation.gif"
     save_diffusion_animation(
-        diffusor=diffusor,
-        model=model,
-        device=device,
-        store_path=anim_path,
-        reverse_transform=reverse_transform,
-        n_images=4
+        diffusor, model, device, anim_path, reverse_transform, n_images=4, guidance_scale=args.guidance_scale
     )
     print(f"Done! Images saved to ./Diffusion/results/{args.run_name}/")
 
 
 def run(args):
+    """
+    Train a model and safe visualizations
+    """
     timesteps = args.timesteps
     image_size = 32
     channels = 3
@@ -319,14 +304,22 @@ def run(args):
     device = "cuda" if not args.no_cuda and torch.cuda.is_available() else "cpu"
 
     print(f"Starting Run: {args.run_name} on {device}")
+    print(f"Scheduler: {args.scheduler}")
+    print(f"Guidance scale (used for sampling): {args.guidance_scale}")
+    print(f"Training mode: {'UNCONDITIONAL' if args.unconditional else 'CONDITIONAL'}")
 
     # Model and Optim setup
-    model = Unet(dim=image_size, channels=channels, dim_mults=(1, 2, 4,)).to(device)
+    num_classes = None if args.unconditional else 10
+    model = Unet(dim=image_size, 
+                 channels=channels, 
+                 dim_mults=(1, 2, 4,), 
+                 num_classes=num_classes
+            ).to(device)
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
     # Diffusion setup
     #my_scheduler = lambda x: linear_beta_schedule(0.0001, 0.02, x)
-    my_scheduler = cosine_beta_schedule
+    my_scheduler = get_scheduler(args.scheduler)
     diffusor = Diffusion(timesteps, my_scheduler, image_size, device)
 
     # define image transformations (e.g. using torchvision)
@@ -352,9 +345,7 @@ def run(args):
     testset = datasets.CIFAR10('./data', download=True, train=False, transform=transform)
     testloader = DataLoader(testset, batch_size=int(batch_size/2), shuffle=True)
 
-    # get labels and images for comparison plot
-    fix_real_images, fix_real_labels = next(iter(valloader))
-
+    # set up directories
     ckpt_dir = f"./Diffusion/models/{args.run_name}"
     results_dir = f"./Diffusion/results/{args.run_name}"
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -383,16 +374,15 @@ def run(args):
         # save imgs
         # sample random images and save them as a plot
         grid_path = os.path.join(results_dir, f"epoch_{epoch}_grid.png")
-        sample_and_save_images(n_images=9, 
-                               diffusor=diffusor, 
-                               model=model, 
-                               device=device, 
-                               store_path=grid_path, 
-                               transform=reverse_transform)
-
-        # create a coparison plot original images vs. generated images
-        # comp_path = f"./results/{args.run_name}/epoch_{epoch}_comparison.png"
-        # comparison_plot(diffusor, model, device, fix_real_images, fix_real_labels, comp_path, epoch=epoch, transform=reverse_transform)
+        plot_labeled_grid(
+            diffusor=diffusor, 
+            model=model, 
+            device=device, 
+            store_path=grid_path, 
+            n_images=16, 
+            transform=reverse_transform, 
+            guidance_scale=args.guidance_scale
+        )
 
         # Checkpoint strategy:
         # always safe the current state of the model
@@ -414,12 +404,12 @@ def run(args):
         device=device,
         store_path=anim_path,
         reverse_transform=reverse_transform,
-        n_images=4
+        n_images=4,
+        guidance_scale=args.guidance_scale
     )
 
     print("Training finished.")
     
-
 
 if __name__ == '__main__':
     args = parse_args()

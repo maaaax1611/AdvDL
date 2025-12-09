@@ -8,7 +8,7 @@ def test_schedulers():
     
     betas_linear = linear_beta_schedule(0.0001, 0.02, timesteps)
     betas_cosine = cosine_beta_schedule(timesteps)
-    betas_sigmoid = sigmoid_beta_schedule(0.0001, 0.02, timesteps) # Falls implementiert
+    betas_sigmoid = sigmoid_beta_schedule(0.0001, 0.02, timesteps)
 
     
     def get_alphas_cumprod(betas):

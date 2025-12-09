@@ -96,7 +96,10 @@ class ResnetBlock(nn.Module):
 
     def __init__(self, dim, dim_out, *, time_emb_dim=None, classes_emb_dim=None, groups=8):
         super().__init__()
+
+        # determine full embedding dimension (time + class)
         full_emb_dim = int(default(time_emb_dim, 0)) + int(default(classes_emb_dim, 0))
+
         self.mlp = nn.Sequential(
             nn.SiLU(),
             nn.Linear(full_emb_dim, dim_out * 2)
@@ -110,14 +113,15 @@ class ResnetBlock(nn.Module):
 
         scale_shift = None
         if exists(self.mlp) and (exists(time_emb) or exists(class_emb)):
+            # 'concatenate' available embeddings
             cond_emb = tuple(filter(exists, (time_emb, class_emb)))
             cond_emb = torch.cat(cond_emb, dim=-1)
+
             cond_emb = self.mlp(cond_emb)
             cond_emb = rearrange(cond_emb, 'b c -> b c 1 1')
             scale_shift = cond_emb.chunk(2, dim=1)
 
         h = self.block1(x, scale_shift=scale_shift)
-
         h = self.block2(h)
 
         return h + self.res_conv(x)
@@ -193,7 +197,6 @@ class PreNorm(nn.Module):
         return self.fn(x)
 
 
-# TODO: make yourself familiar with the code that is presented here, as it closely interacts with the rest of the exercise.
 class Unet(nn.Module):
     def __init__(
         self,
@@ -203,7 +206,7 @@ class Unet(nn.Module):
         dim_mults=(1, 2, 4, 8),
         channels=3,
         resnet_block_groups=4,
-        class_free_guidance=False,  # TODO: Incorporate in your code
+        class_free_guidance=False, # this is ignored. cfg is controlled via num classes
         p_uncond=None,
         num_classes=None,
     ):
@@ -231,7 +234,16 @@ class Unet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        # TODO: Implement a class embedder for the conditional part of the classifier-free guidance & define a default
+        # class embeddings
+        self.num_classes = num_classes
+        classes_dim = 0
+        if num_classes is not None:
+            # add 1 class for the 'null' class (for unconditional generation)
+            # embedding size is the same as for the time emebeddings
+            self.classes_emb = nn.Embedding(num_classes+1, time_dim)
+            classes_dim = time_dim
+        else:
+            self.classes_emb = None # model will behave purely uncond (as before)
 
 
         # layers
@@ -242,14 +254,15 @@ class Unet(nn.Module):
         # TODO: Adapt all blocks accordingly such that they can accommodate a class embedding as well
 
         # - ENCODER -
+        # NOTE: We need to add the class embedding dimension to all ResNet blocks
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
-                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim, classes_emb_dim=classes_dim),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim, classes_emb_dim=classes_dim),
                         Residual(PreNorm(dim_in, LinearAttention(dim_in))),
                         Downsample(dim_in, dim_out)
                         if not is_last
@@ -260,9 +273,9 @@ class Unet(nn.Module):
 
         # - BOTTLENECK -
         mid_dim = dims[-1]
-        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, classes_emb_dim=classes_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
-        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, classes_emb_dim=classes_dim)
 
         # - DECODER -
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
@@ -271,8 +284,8 @@ class Unet(nn.Module):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_out + dim_in, dim_out, time_emb_dim=time_dim),
-                        block_klass(dim_out + dim_in, dim_out, time_emb_dim=time_dim),
+                        block_klass(dim_out + dim_in, dim_out, time_emb_dim=time_dim, classes_emb_dim=classes_dim),
+                        block_klass(dim_out + dim_in, dim_out, time_emb_dim=time_dim, classes_emb_dim=classes_dim),
                         Residual(PreNorm(dim_out, LinearAttention(dim_out))),
                         Upsample(dim_out, dim_in)
                         if not is_last
@@ -283,10 +296,10 @@ class Unet(nn.Module):
 
         self.out_dim = default(out_dim, channels)
 
-        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim)
+        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim, classes_emb_dim=classes_dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
-    def forward(self, x, time):
+    def forward(self, x, time, classes=None, cond_drop_prob=None):
 
         x = self.init_conv(x)
         r = x.clone()
@@ -297,38 +310,54 @@ class Unet(nn.Module):
         #  - for each element in the batch, the class embedding is replaced with the null token with a certain probability during training
         #  - during testing, you need to have control over whether the conditioning is applied or not
         #  - analogously to the time embedding, the class embedding is provided in every ResNet block as additional conditioning
+        c = None
+        if self.classes_emb is not None:
+            # if no classes are provided, we assume unconditional generation (as mentioned above)
+            if classes is None:
+                # null token is located at index 'num_classes'
+                classes = torch.full((x.shape[0],), self.num_classes, device=x.device, dtype=torch.long)
 
+            # during training: randomly drop labels to also train uncond generation
+            if self.training and cond_drop_prob is not None and cond_drop_prob > 0:
+                # create a bool drop mask: 0 = drop label; 1 = keep label
+                keep_mask = torch.rand((x.shape[0],), device=x.device) > cond_drop_prob
+                # apply mask to labels
+                null_tokens = torch.full_like(classes, self.num_classes)
+                classes = torch.where(keep_mask, classes, null_tokens)
+
+            c = self.classes_emb(classes)
 
         h = []
 
         # - ENCODER -
+        # now we need to pass our class embeddings into the net (if we train conditionally, otherwise class_emb=None)
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, t)
+            x = block1(x, time_emb=t, class_emb=c)
             h.append(x)
 
-            x = block2(x, t)
+            x = block2(x, time_emb=t, class_emb=c)
             x = attn(x)
             h.append(x)
 
             x = downsample(x)
 
         # - BOTTLENECK -
-        x = self.mid_block1(x, t)
+        x = self.mid_block1(x, time_emb=t, class_emb=c)
         x = self.mid_attn(x)
-        x = self.mid_block2(x, t)
+        x = self.mid_block2(x, time_emb=t, class_emb=c)
 
         # - DECODER -
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim=1)
-            x = block1(x, t)
+            x = block1(x, time_emb=t, class_emb=c)
 
             x = torch.cat((x, h.pop()), dim=1)
-            x = block2(x, t)
+            x = block2(x, time_emb=t, class_emb=c)
             x = attn(x)
 
             x = upsample(x)
 
         x = torch.cat((x, r), dim=1)
 
-        x = self.final_res_block(x, t)
+        x = self.final_res_block(x, time_emb=t, class_emb=c)
         return self.final_conv(x)

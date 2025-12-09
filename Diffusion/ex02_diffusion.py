@@ -86,7 +86,7 @@ class Diffusion:
         self.sqrt_betas = torch.sqrt(self.betas)
 
     @torch.no_grad()
-    def p_sample(self, model, x, t, t_index):
+    def p_sample(self, model, x, t, t_index, classes=None, guidance_scale=0.0):
         # TODO (2.2): implement the reverse diffusion process of the model for (noisy) samples x and timesteps t. Note that x and t both have a batch dimension
 
         # Equation 11 in the paper
@@ -100,8 +100,22 @@ class Diffusion:
         sqrt_recip_alphas_t = extract(self.sqrt_recip_alphas, t, x.shape)
 
         # predict noise and subtract it from image --> model mean
+        # for classifier free guidance only the noise prediction changes
+        if classes is not None and guidance_scale > 0.0:
+            # in this case we use cfg
+            # conditional prediction: cond_drop_prob=0.0 --> use labels 100%
+            eps_cond = model(x, t, classes=classes, cond_drop_prob=0.0)
+
+            # unconditional prediction: classes=None --> enforce usage of null token (see model.py)
+            eps_uncond = model(x, t, classes=None, cond_drop_prob=0.0)
+
+            # combine predictions
+            predicted_noise = (1 + guidance_scale) * eps_cond - guidance_scale * eps_uncond
+        else:
+            # standard prediction
+            predicted_noise = model(x, t)
+
         # equation (8)
-        predicted_noise = model(x, t)
         model_mean = sqrt_recip_alphas_t * (x - beta_t / sqrt_one_minus_alphas_cumprod_t * predicted_noise)
 
         if t_index == 0:
@@ -116,18 +130,24 @@ class Diffusion:
         
  
     @torch.no_grad()
-    def sample(self, model, image_size, batch_size=16, channels=3, return_all_timesteps = False):
+    def sample(self, model, image_size, batch_size=16, channels=3, return_all_timesteps = False, classes=None, guidance_scale=0.0):
         # TODO (2.2): Implement the full reverse diffusion loop from random noise to an image, iteratively ''reducing'' the noise in the generated image.
         # TODO (2.2): Return the generated images
         # we start with x_t ~ N(0, I): random normal noise
         img = torch.randn((batch_size, channels, image_size, image_size), device=self.device)
         
+        # ensure classes are on right device (gpu)
+        if classes is not None:
+            classes = classes.to(self.device)
+
         # list to store intermediate steps
         imgs = [img]
         # iterate backwards over all timesteps
         for i in tqdm(reversed(range(0, self.timesteps)), desc='sampling loop time step', total=self.timesteps):
             t = torch.full((batch_size,), i, device=self.device, dtype=torch.long)
-            img = self.p_sample(model, img, t, i)
+
+            # pass cfg params to p_sample
+            img = self.p_sample(model, img, t, i, classes=classes, guidance_scale=guidance_scale)
             
             #img = torch.clamp(img, -3.0, 3.0)
 
@@ -160,7 +180,7 @@ class Diffusion:
         x_t = sqrt_alphas_cumprod_t * x_zero + sqrt_one_minus_alphas_cumprod_t * noise
         return x_t
 
-    def p_losses(self, denoise_model, x_zero, t, noise=None, loss_type="l1"):
+    def p_losses(self, denoise_model, x_zero, t, noise=None, loss_type="l1", classes=None, cond_drop_prob=None):
         # TODO (2.2): compute the input to the network using the forward diffusion process and predict the noise using the model; if noise is None, you will need to create a new noise vector, otherwise use the provided one.
         # generate noise if not provided
         if noise is None:
@@ -170,7 +190,8 @@ class Diffusion:
         x_t = self.q_sample(x_zero=x_zero, t=t, noise=noise)
 
         # predict the noise using the model
-        predicted_noise = denoise_model(x_t, t)
+        # also pass cfg params in here
+        predicted_noise = denoise_model(x_t, t, classes=classes, cond_drop_prob=cond_drop_prob)
 
         if loss_type == 'l1':
             # TODO (2.2): implement an L1 loss for this task
