@@ -31,16 +31,16 @@ device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("
 ## Misc
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, auc
 
-from ex03_data import get_datasets, TransformTensorDataset
-from ex03_model import ShallowCNN
-from ex03_ood import score_fn
+from data import get_datasets, TransformTensorDataset
+from model import ShallowCNN
+from ood import score_fn
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Configure training/inference/sampling for EBMs')
-    parser.add_argument('--data_dir', type=str, default="./data",
+    parser.add_argument('--data_dir', type=str, default="./data/GLYPHS",
                         help='path to directory with glyph image data')
-    parser.add_argument('--ckpt_dir', type=str, default="./saved_models",
+    parser.add_argument('--ckpt_dir', type=str, default="./models",
                         help='path to directory where model checkpoints are stored')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='input batch size for training (default: 32)')
@@ -83,6 +83,11 @@ class MCMCSampler:
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
 
+        # Buffer initialization: A list of lists
+        # self.examples[i] holds the buffer images for class i
+        # why list of lists?: we need individial buffers for each class when sampling class-conditionally
+        self.examples = [[] for _ in range(num_classes)]
+
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
         Synthesize images from the current parameterized q_\theta
@@ -105,8 +110,6 @@ class MCMCSampler:
         had_gradients_enabled = torch.is_grad_enabled()
         torch.set_grad_enabled(True)
 
-        # TODO (3.3): Implement SGLD-based synthesis with reservoir sampling
-
         # Sample initial data points x^0 to get a starting point for the sampling process.
         # As seen in the lecture and the theoretical recap, there exist multiple variants how we can approach this task.
 
@@ -119,29 +122,113 @@ class MCMCSampler:
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
 
-        inp_imgs = None  # corresponds to the initial sample(s) x^0
+        # -----------------------------------------------------------------------
+        # Initialize x^0 (Start points) using Reservoir Sampling
+        # -----------------------------------------------------------------------
+        # We pick mostly from buffer (95%), rarely fresh noise (5%)
+        n_new = np.random.binomial(self.sample_size, 0.05)
+        n_old = self.sample_size - n_new
+
+        # Generate fresh noise [-1, 1]
+        rand_imgs = torch.rand((n_new,) + self.img_shape).to(device) * 2 - 1
+
+        # Pick from buffer
+        old_imgs = []
+        if n_old > 0:
+            # If we have class labels, we pick from the specific class buffers
+            if clabel is not None:
+                for label in clabel[:n_old]:
+                    label_idx = label.item()
+                    buffer = self.examples[label_idx]
+                    if len(buffer) > 0:
+                        index = np.random.randint(len(buffer))
+                        old_imgs.append(buffer[index])
+                    else:
+                        # Fallback: if buffer for this class is empty, use noise
+                        old_imgs.append(torch.rand(self.img_shape).to(device) * 2 - 1)
+                old_imgs = torch.stack(old_imgs)
+            else:
+                # Unconditional: Pick randomly from all available buffers
+                all_imgs = [img for sublist in self.examples for img in sublist]
+                if len(all_imgs) > 0:
+                    indices = np.random.choice(len(all_imgs), size=n_old)
+                    old_imgs = torch.stack([all_imgs[i] for i in indices])
+                else:
+                    old_imgs = torch.rand((n_old,) + self.img_shape).to(device) * 2 - 1
+            
+            old_imgs = old_imgs.to(device)
+
+        # Combine new and old to get the starting batch
+        if n_old > 0:
+            inp_imgs = torch.cat([rand_imgs, old_imgs], dim=0).detach()
+        else:
+            inp_imgs = rand_imgs.detach()
+            
         inp_imgs.requires_grad = True
 
         # List for storing generations at each step
         imgs_per_step = []
 
-        # Execute K MCMC steps
+        # -----------------------------------------------------------------------
+        # Execute K MCMC steps (SGLD)
+        # -----------------------------------------------------------------------
+        noise_scale = 0.005
+
         for _ in range(steps):
             # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1).
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
+            noise = torch.randn_like(inp_imgs) * noise_scale
+            inp_imgs.data.add_(noise).clamp_(min=-1.0, max=1.0)
 
-            # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
-            # class-conditional sampling (which is optional from a methodological point of view), make sure that you
-            # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
+            # (2) Calculate Energy and Gradient
+            # We want to minimize Energy E(x). 
+            # forward() returns Energy.
+            energy = self.model(inp_imgs, clabel)
 
-            # (3) Perform gradient ascent to regions of higher probability
-            # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
-            # considered the learning rate of the SGLD update.
+            # Calculate Gradient of energy sum w.r.t input image
+            # grad = dE/dx
+            grad = torch.autograd.grad(energy.sum(), inp_imgs)[0]
+
+            # (3) Perform gradient ascent to regions of higher probability (gradient descent if we consider the energy surface!)
+            # x_new = x_old - step_size * dE/dx
+            # Note: Clamping of gradients (as suggested in the Tutorial) should improve stability
+            grad.data.clamp_(-0.03, 0.03)
+            inp_imgs.data.add_(-step_size * grad.data)
+
+            # clamp image back to valid range
+            inp_imgs.data.clamp_(min=-1.0, max=1.0)
+
+            # clear gradients for next step
+            inp_imgs.grad = None
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
-                pass
+                imgs_per_step.append(inp_imgs.clone().detach())
+        
+        # -----------------------------------------------------------------------
+        # Update Buffer (Reservoir Sampling)
+        # -----------------------------------------------------------------------
+        # We detach the images from the graph to store them
+        final_imgs = inp_imgs.detach().cpu()
+        
+        # If we have labels, store in respective class buckets
+        if clabel is not None:
+            for i, label in enumerate(clabel):
+                label_idx = label.item()
+                self.examples[label_idx].append(final_imgs[i])
+                # Limit buffer size (FIFO)
+                if len(self.examples[label_idx]) > self.cbuffer_size:
+                    self.examples[label_idx].pop(0)
+        else:
+            # If unconditional, we distribute them randomly or to a default bucket.
+            # Here we just distribute round-robin or to random buckets to keep them alive
+            for i in range(self.sample_size):
+                rand_cls = np.random.randint(self.num_classes)
+                self.examples[rand_cls].append(final_imgs[i])
+                if len(self.examples[rand_cls]) > self.cbuffer_size:
+                    self.examples[rand_cls].pop(0)
 
+        # Cleanup
         for p in self.model.parameters():
             p.requires_grad = True
         self.model.train(is_training)
@@ -228,12 +315,51 @@ class JEM(pl.LightningModule):
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
         loss = None
+        real_imgs, labels = batch
+
+        # Generate fake images (by sampling from q_theta (model))
+        if self.ccond_sample:
+            fake_imgs = self.sampler.synthesize_samples(clabel=labels, steps=60, step_size=10)
+        else:
+            fake_imgs = self.sampler.synthesize_samples(clabel=None, steps=60, step_size=10)
+
+        # Calculate Energies
+        # For p(x) distribution matching we use E(x) = -LogSumExp(f(x)) (see model implementation)
+        # to get this we need to pass our real and fake images through the network
+        real_energy = self.cnn(real_imgs, y=None)
+        fake_energy = self.cnn(fake_imgs, y=None)
+
+        # Calculate Losses
+        # Regulatization: constrain energy magnitude --> stabilize training
+        reg_loss = self.hparams.alpha * (real_energy**2 + fake_energy**2).mean()
+
+        # Contrastive Divergence: Minimize E(real) - E(fake)
+        # (Lower E(real) -> higher p(real); Higher E(fake) -> lower p(fake))
+        cdiv_loss = real_energy.mean() - fake_energy.mean()
+        
+        loss = reg_loss + cdiv_loss
+        
+        # Logging
+        self.log('train_contrastive_divergence', cdiv_loss, on_step=True, on_epoch=True)
+        self.log('train_reg_loss', reg_loss, on_step=True, on_epoch=True)
+        
         return loss
 
     def pyx_step(self, batch):
         # TODO (3.4): Implement p(y|x) step.
         # Here, we want to calculate the classification loss using the class logits infered by the neural network.
-        loss = None
+        x, y = batch
+
+        # Standard Classification
+        logits = self.cnn.get_logits(x)
+        loss = torch.nn.functional.cross_entropy(logits, y)
+
+        # Metrics
+        with torch.no_grad():
+            preds = torch.argmax(logits, dim=1)
+            acc = (preds == y).float().mean()
+            self.log('train_acc', acc, on_step=False, on_epoch=True)
+
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -242,14 +368,41 @@ class JEM(pl.LightningModule):
         # Here, we specify the update equation used to tune the model parameters.
         # Ideally, we only need to call the px_step() and pyx_step() methods and combine their loss terms to build up
         # the factorized joint density loss introduced by Gratwohl et al. .
-        loss = None
+        
+        # Generative Loss
+        loss_px = self.px_step(batch, self.ccond_sample)
+
+        # Predictive Loss
+        loss_pyx = self.pyx_step(batch)
+
+        # Joint Loss
+        loss = loss_px + loss_pyx
+
+        self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx, dataset_idx=None):
-        # Note: batch_idx and dataset_idx not needed (just there for PyTorch
-        # Lightning)
-        # TODO (3.4) 
-        pass
+        x, y = batch
+        
+        # 1. Classification Validation
+        logits = self.cnn.get_logits(x)
+        loss_cls = torch.nn.functional.cross_entropy(logits, y)
+        self.log('val_loss_cls', loss_cls)
+        
+        # Update metrics
+        self.valid_metrics.update(logits, y)
+        
+        # 2. Generative Validation (Contrastive Divergence Proxy)
+        # Check if Real Energy < Noise Energy
+        noise = torch.rand_like(x) * 2 - 1
+        real_energy = self.cnn(x, y=None)
+        noise_energy = self.cnn(noise, y=None)
+        
+        val_cdiv = real_energy.mean() - noise_energy.mean()
+        self.log('val_contrastive_divergence', val_cdiv)
+        
+        # Log metrics at end of epoch
+        self.log_dict(self.valid_metrics, on_step=False, on_epoch=True)
 
 
 def run_training(args) -> pl.LightningModule:
@@ -417,6 +570,7 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     """
     model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
+    model.eval() # Important: Switch to eval mode
     pl.seed_everything(42)
 
     # Datasets & Dataloaders
@@ -425,37 +579,101 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     num_workers = args.num_workers
     datasets: Dict[str, TransformTensorDataset] = get_datasets(data_dir)
 
-    # Test loader
-    test_loader = data.DataLoader(datasets['test'], batch_size=batch_size, shuffle=False, drop_last=False,
-                                  num_workers=num_workers)
-    # OOD loaders for OOD types a and b
-    ood_ta_loader = data.DataLoader(datasets['ood_ta'], batch_size=batch_size, shuffle=False, drop_last=False,
-                                    num_workers=num_workers)
-    ood_tb_loader = data.DataLoader(datasets['ood_tb'], batch_size=batch_size, shuffle=False, drop_last=False,
-                                    num_workers=num_workers)
+    # Loaders
+    test_loader = data.DataLoader(datasets['test'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
+    ood_ta_loader = data.DataLoader(datasets['ood_ta'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
+    ood_tb_loader = data.DataLoader(datasets['ood_tb'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
 
-    # TODO (3.6): Calculate and visualize the score distributions, e.g. with a histogram. Analyze whether we can
-    #  visualy tell apart the different data distributions based on their assigned score.
+    # 1. Calculate scores
+    # We use score_fn from ood.py which returns -Energy (so high score = real data)
+    
+    def get_scores(loader):
+        scores = []
+        with torch.no_grad():
+            for x, _ in tqdm.tqdm(loader, desc="Calculating scores"):
+                x = x.to(device)
+                # score="px" corresponds to p(x) ~ exp(-E(x)), so returns negative energy
+                s = score_fn(model, x, score="px") 
+                scores.append(s)
+        return torch.cat(scores).numpy()
 
-    # TODO (3.6): Solve a binary classification on the soft scores and evaluate and AUROC and/or AUPRC score for
-    #  discrimination between the training samples and one of the OOD distributions.
+    print("Scoring Test Data (ID)...")
+    scores_test = get_scores(test_loader)
+    
+    print("Scoring OOD Type A...")
+    scores_ood_ta = get_scores(ood_ta_loader)
+    
+    print("Scoring OOD Type B...")
+    scores_ood_tb = get_scores(ood_tb_loader)
+
+    # 2. Visualize distributions (Histogram)
+    plt.figure(figsize=(10, 6))
+    sns.histplot(scores_test, label='ID (Test)', kde=True, stat="density", color="blue", alpha=0.3)
+    sns.histplot(scores_ood_ta, label='OOD Type A', kde=True, stat="density", color="orange", alpha=0.3)
+    sns.histplot(scores_ood_tb, label='OOD Type B', kde=True, stat="density", color="green", alpha=0.3)
+    plt.title("Energy-based Score Distribution (-Energy)")
+    plt.xlabel("Score (Higher = More likely Real)")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.savefig("ood_histogram.png")
+    print("Histogram saved to ood_histogram.png")
+
+    # 3. Solve binary classification (AUROC)
+    # Task: Assign target label 0 to ID and 1 to OOD (as per PDF instruction)
+    
+    def calculate_auroc(id_scores, ood_scores, name):
+        # ID gets label 0, OOD gets label 1
+        y_true = np.concatenate([np.zeros(len(id_scores)), np.ones(len(ood_scores))])
+        y_scores = np.concatenate([id_scores, ood_scores])
+        
+        # Since our score is -Energy (High for ID, Low for OOD), but the label is 1 for OOD,
+        # we expect the classifier to predict 1 for LOW scores. 
+        # AUROC functions usually expect Higher Score = Higher Probability of Class 1.
+        # So we negate the scores passed to roc_auc_score to align "High Value" with "Class 1 (OOD)".
+        auroc = roc_auc_score(y_true, -y_scores)
+        print(f"AUROC (ID vs {name}): {auroc:.4f}")
+
+    calculate_auroc(scores_test, scores_ood_ta, "OOD Type A")
+    calculate_auroc(scores_test, scores_ood_tb, "OOD Type B")
 
 
 if __name__ == '__main__':
     args = parse_args()
 
     # 1) Run training
+    # Note: This trains the model and saves checkpoints to args.ckpt_dir
     run_training(args)
 
     # 2) Evaluate model
+    # We need to find the best checkpoint file automatically
     ckpt_path: str = ""
+    
+    # Search for the best checkpoint based on mAP (as defined in ModelCheckpoint callback)
+    if os.path.exists(args.ckpt_dir):
+        # We look for files matching the pattern defined in ModelCheckpoint
+        import glob
+        # Search for checkpoints containing "val_mAP"
+        search_pattern = os.path.join(args.ckpt_dir, "*.ckpt")
+        files = glob.glob(search_pattern)
+        
+        if files:
+            # Simple heuristic: take the most recently created file
+            # Ideally, we would parse the filename for the best score, but latest is usually fine 
+            # as Lightning saves 'last.ckpt' or best ones.
+            ckpt_path = max(files, key=os.path.getctime)
+            print(f"Found checkpoint: {ckpt_path}")
+        else:
+            print("Warning: No checkpoint found in directory!")
+    
+    if ckpt_path:
+        # Classification performance
+        run_evaluation(args, ckpt_path)
 
-    # Classification performance
-    run_evaluation(args, ckpt_path)
+        # Image synthesis
+        run_generation(args, ckpt_path, conditional=True)
+        run_generation(args, ckpt_path, conditional=False)
 
-    # Image synthesis
-    run_generation(args, ckpt_path, conditional=True)
-    run_generation(args, ckpt_path, conditional=False)
-
-    # OOD Analysis
-    run_ood_analysis(args, ckpt_path)
+        # OOD Analysis
+        run_ood_analysis(args, ckpt_path)
+    else:
+        print("Skipping evaluation because no checkpoint path was found.")
