@@ -2,6 +2,7 @@
 import os
 import numpy as np
 import tqdm
+import glob
 import pandas as pd
 import argparse
 from typing import Union, Dict
@@ -35,6 +36,9 @@ from data import get_datasets, TransformTensorDataset
 from model import ShallowCNN
 from ood import score_fn
 
+# Define the output directory globally so it is accessible in functions
+RESULTS_DIR = "./EBM/results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Configure training/inference/sampling for EBMs')
@@ -517,19 +521,19 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
         plt.xticks([(generated_imgs.shape[-1] + 2) * (0.5 + j) for j in range(8 + 1)],
                    labels=[1] + list(range(step_size, generated_imgs.shape[0] + 1, step_size)))
         plt.yticks([])
-        plt.savefig(f"{'conditional' if conditional else 'unconditional'}_sample_label={label}.png")
+        plt.savefig(os.path.join(RESULTS_DIR, f"{'conditional' if conditional else 'unconditional'}_sample_label={label}.png"))
 
     # Visualize end results
     grid = torchvision.utils.make_grid(torch.cat(synth_imgs), nrow=k, normalize=True, value_range=(-1, 1),
-                                       pad_value=0.5,
-                                       padding=2)
+                                     pad_value=0.5,
+                                     padding=2)
     grid = grid.permute(1, 2, 0)
     grid = grid[..., 0].numpy()
     plt.figure(figsize=(12, 24))
     plt.imshow(grid, cmap='Greys')
     plt.xticks([])
     plt.yticks([])
-    plt.savefig(f"{'conditional' if conditional else 'unconditional'}_samples.png")
+    plt.savefig(os.path.join(RESULTS_DIR, f"{'conditional' if conditional else 'unconditional'}_samples.png"))
 
 
 def run_evaluation(args, ckpt_path: Union[str, Path]):
@@ -553,7 +557,8 @@ def run_evaluation(args, ckpt_path: Union[str, Path]):
     test_loader = data.DataLoader(datasets['test'], batch_size=batch_size, shuffle=False, drop_last=False,
                                   num_workers=num_workers)
 
-    trainer = pl.Trainer() #gpus=1 if str(device).startswith("cuda") else 0)
+    logger = pl.loggers.TensorBoardLogger(save_dir=args.ckpt_dir, name="lightning_logs")
+    trainer = pl.Trainer(logger=logger) #gpus=1 if str(device).startswith("cuda") else 0)
     results = trainer.validate(model, dataloaders=test_loader)
     print(results)
     return results
@@ -615,7 +620,7 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     plt.xlabel("Score (Higher = More likely Real)")
     plt.ylabel("Density")
     plt.legend()
-    plt.savefig("ood_histogram.png")
+    plt.savefig(os.path.join(RESULTS_DIR, "ood_histogram.png"))
     print("Histogram saved to ood_histogram.png")
 
     # 3. Solve binary classification (AUROC)
@@ -636,36 +641,67 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     calculate_auroc(scores_test, scores_ood_ta, "OOD Type A")
     calculate_auroc(scores_test, scores_ood_tb, "OOD Type B")
 
+def find_best_checkpoint(base_dir):
+    """
+    Recursively searches for the best checkpoint in the given base directory.
+    
+    Priority for selection:
+    1. Filename contains 'val_mAP' (Best classification performance)
+    2. Filename contains 'val_condiv' (Most stable energy function)
+    3. Filename contains 'last' (Latest epoch)
+    4. Any other .ckpt file (Fallback, selected by modification time)
+    """
+    # Construct search pattern for recursive search in all subdirectories
+    # This handles structures like: models/lightning_logs/version_X/checkpoints/*.ckpt
+    search_pattern = os.path.join(base_dir, "**", "*.ckpt")
+    all_ckpts = glob.glob(search_pattern, recursive=True)
+
+    if not all_ckpts:
+        return None
+
+    # Filter checkpoints based on their filenames
+    map_ckpts = [c for c in all_ckpts if "val_mAP" in os.path.basename(c)]
+    condiv_ckpts = [c for c in all_ckpts if "val_condiv" in os.path.basename(c)]
+    last_ckpts = [c for c in all_ckpts if "last" in os.path.basename(c)]
+
+    # Selection logic: Prioritize metrics over simple 'last' checkpoints
+    # In case of multiple matches (e.g. multiple versions), pick the most recently modified file
+    if map_ckpts:
+        print("Selecting best checkpoint based on val_mAP.")
+        return max(map_ckpts, key=os.path.getmtime)
+    elif condiv_ckpts:
+        print("Selecting best checkpoint based on val_condiv (no mAP found).")
+        return max(condiv_ckpts, key=os.path.getmtime)
+    elif last_ckpts:
+        print("Selecting 'last' checkpoint (no metric-based checkpoints found).")
+        return max(last_ckpts, key=os.path.getmtime)
+    else:
+        print("Selecting most recent checkpoint found (fallback).")
+        return max(all_ckpts, key=os.path.getmtime)
 
 if __name__ == '__main__':
     args = parse_args()
 
-    # 1) Run training
-    # Note: This trains the model and saves checkpoints to args.ckpt_dir
-    run_training(args)
+    MANUAL_CHECKPOINT_PATH = None
 
-    # 2) Evaluate model
-    # We need to find the best checkpoint file automatically
-    ckpt_path: str = ""
-    
-    # Search for the best checkpoint based on mAP (as defined in ModelCheckpoint callback)
-    if os.path.exists(args.ckpt_dir):
-        # We look for files matching the pattern defined in ModelCheckpoint
-        import glob
-        # Search for checkpoints containing "val_mAP"
-        search_pattern = os.path.join(args.ckpt_dir, "*.ckpt")
-        files = glob.glob(search_pattern)
+    # 1) Run training
+    # run_training(args) 
+
+    # 2) Determine Checkpoint Path
+    ckpt_path = None
+
+    if MANUAL_CHECKPOINT_PATH:
+        print(f"Using manually defined checkpoint: {MANUAL_CHECKPOINT_PATH}")
+        ckpt_path = MANUAL_CHECKPOINT_PATH
+    else:
+        print(f"Automatically searching for best checkpoint in: {args.ckpt_dir}")
+        ckpt_path = find_best_checkpoint(args.ckpt_dir)
+
+    print(ckpt_path)
+    # 3) Run Evaluation & Analysis
+    if ckpt_path and os.path.exists(ckpt_path):
+        print(f"Loading checkpoint: {ckpt_path}")
         
-        if files:
-            # Simple heuristic: take the most recently created file
-            # Ideally, we would parse the filename for the best score, but latest is usually fine 
-            # as Lightning saves 'last.ckpt' or best ones.
-            ckpt_path = max(files, key=os.path.getctime)
-            print(f"Found checkpoint: {ckpt_path}")
-        else:
-            print("Warning: No checkpoint found in directory!")
-    
-    if ckpt_path:
         # Classification performance
         run_evaluation(args, ckpt_path)
 
@@ -676,4 +712,4 @@ if __name__ == '__main__':
         # OOD Analysis
         run_ood_analysis(args, ckpt_path)
     else:
-        print("Skipping evaluation because no checkpoint path was found.")
+        print(f"Error: Checkpoint not found or path is invalid: {ckpt_path}")
