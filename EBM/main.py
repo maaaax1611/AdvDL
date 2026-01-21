@@ -573,6 +573,9 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     :param ckpt_path: local path to the trained checkpoint.
     :return: None
     """
+    # Note to avoid confusion:
+    # I plottet the score and NOT the energy directly. Score = -Energy, so high score = likely real data
+    
     model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
     model.eval() # Important: Switch to eval mode
@@ -588,6 +591,7 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     test_loader = data.DataLoader(datasets['test'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
     ood_ta_loader = data.DataLoader(datasets['ood_ta'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
     ood_tb_loader = data.DataLoader(datasets['ood_tb'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
+    ood_noise_loader = data.DataLoader(datasets['ood_noise'], batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
 
     # 1. Calculate scores
     # We use score_fn from ood.py which returns -Energy (so high score = real data)
@@ -610,12 +614,16 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     
     print("Scoring OOD Type B...")
     scores_ood_tb = get_scores(ood_tb_loader)
+    
+    print("Scoring OOD Pure Noise...")
+    scores_ood_noise = get_scores(ood_noise_loader)
 
     # 2. Visualize distributions (Histogram)
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     sns.histplot(scores_test, label='ID (Test)', kde=True, stat="density", color="blue", alpha=0.3)
     sns.histplot(scores_ood_ta, label='OOD Type A', kde=True, stat="density", color="orange", alpha=0.3)
     sns.histplot(scores_ood_tb, label='OOD Type B', kde=True, stat="density", color="green", alpha=0.3)
+    sns.histplot(scores_ood_noise, label='OOD Pure Noise', kde=True, stat="density", color="red", alpha=0.3)
     plt.title("Energy-based Score Distribution (-Energy)")
     plt.xlabel("Score (Higher = More likely Real)")
     plt.ylabel("Density")
@@ -640,6 +648,7 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
 
     calculate_auroc(scores_test, scores_ood_ta, "OOD Type A")
     calculate_auroc(scores_test, scores_ood_tb, "OOD Type B")
+    calculate_auroc(scores_test, scores_ood_noise, "OOD Pure Noise")
 
 def find_best_checkpoint(base_dir):
     """

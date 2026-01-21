@@ -67,6 +67,11 @@ def get_datasets(data_dir: Union[str, Path]) -> Dict[str, TransformTensorDataset
     # Two types of OOD datasets
     X_ood_ta = torch.from_numpy(ood_ta).to(torch.float32).unsqueeze(1)
     X_ood_tb = torch.from_numpy(ood_tb).to(torch.float32).unsqueeze(1)
+    
+    # Generate pure noise dataset (random uniform noise matching the shape and range of training data)
+    num_noise_samples = len(ood_ta)  # Match the size of other OOD datasets
+    noise_shape = (num_noise_samples,) + X_ood_ta.shape[1:]
+    X_noise = torch.rand(noise_shape, dtype=torch.float32)  # Uniform noise in [0, 1]
 
     std_transform = transforms.Compose([transforms.Lambda(minmax),
                                         transforms.Resize(size=56,antialias=True),
@@ -82,9 +87,11 @@ def get_datasets(data_dir: Union[str, Path]) -> Dict[str, TransformTensorDataset
     # Create the OOD datasets
     ood_ta_set = TransformTensorDataset(X_ood_ta, transform=std_transform)
     ood_tb_set = TransformTensorDataset(X_ood_tb, transform=std_transform)
+    ood_noise_set = TransformTensorDataset(X_noise, transform=std_transform)
 
     return {'train': train_set,
             'val': val_set,
             'test': test_set,
             'ood_ta': ood_ta_set,
-            'ood_tb': ood_tb_set}
+            'ood_tb': ood_tb_set,
+            'ood_noise': ood_noise_set}
